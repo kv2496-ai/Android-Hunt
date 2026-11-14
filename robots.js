@@ -4,6 +4,32 @@ import { TILE_SIZE as T, isWalkable, EVENTS } from "./shared.js";
 const PATROL_STEP = 0.48;
 const CONE_COSINE = Math.cos(Math.PI / 6);
 const DIRECTIONS = [{ x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 0, y: -1 }];
+const alarmBindings = new WeakMap();
+const alarmCounts = new WeakMap();
+
+export function getAlarmCount(map) { return alarmCounts.get(map) || 0; }
+
+function listenForAlarms(robots, map, bus) {
+  let binding = alarmBindings.get(bus);
+  if (!binding) {
+    binding = { robots, map };
+    alarmBindings.set(bus, binding);
+    bus.on("generatorAlarm", target => {
+      if (!target || !isWalkable(binding.map, target.x, target.y)) return;
+      alarmCounts.set(binding.map, getAlarmCount(binding.map) + 1);
+      for (const robot of binding.robots) {
+        if (Math.hypot(robot.x - target.x, robot.y - target.y) > 10) continue;
+        const route = planRoute(robot, binding.map, target) || [];
+        robot.alert = { target: { x: target.x, y: target.y }, route, searching: !route.length,
+          searchLeft: 3, searchClock: 0, flash: 0.9 };
+        robot.clock = 0;
+        robot.route = [];
+      }
+    });
+  }
+  // One subscription per game bus; replace its context on retries and new floors.
+  binding.robots = robots; binding.map = map;
+}
 
 export function createRobots(map) {
   return map.robotSpawns.map((p, i) => ({
@@ -13,8 +39,8 @@ export function createRobots(map) {
   }));
 }
 
-/** Pick a random reachable destination, then reconstruct a shortest cardinal route. */
-function planPatrol(robot, map) {
+/** Reconstruct a shortest cardinal route to an alarm or a random patrol destination. */
+function planRoute(robot, map, target) {
   const start = robot.y * map.width + robot.x;
   const previous = new Int32Array(map.width * map.height).fill(-1);
   previous[start] = start;
@@ -28,10 +54,16 @@ function planPatrol(robot, map) {
       queue.push(next);
     }
   }
-  if (queue.length < 2) return [];
-  // Local random state makes retries reproducible without changing global randomness.
-  robot.patrolSeed = (Math.imul(robot.patrolSeed ?? start, 1664525) + 1013904223) >>> 0;
-  const destination = queue[1 + Math.floor(robot.patrolSeed / 4294967296 * (queue.length - 1))];
+  let destination;
+  if (target) {
+    destination = target.y * map.width + target.x;
+    if (previous[destination] === -1) return null;
+  } else {
+    if (queue.length < 2) return [];
+    // Local random state makes retries reproducible without changing global randomness.
+    robot.patrolSeed = (Math.imul(robot.patrolSeed ?? start, 1664525) + 1013904223) >>> 0;
+    destination = queue[1 + Math.floor(robot.patrolSeed / 4294967296 * (queue.length - 1))];
+  }
   const route = [];
   for (let tile = destination; tile !== start; tile = previous[tile])
     route.push({ x: tile % map.width, y: Math.floor(tile / map.width) });
@@ -80,9 +112,42 @@ export function canSeePlayer(map, robot, player, sightRange) {
 }
 
 export function detectPlayer(robots, player, map, sightRange, bus) {
+  listenForAlarms(robots, map, bus);
   const robot = robots.find(r => canSeePlayer(map, r, player, sightRange));
   if (robot) bus.emit(EVENTS.CAUGHT, { robot, player });
   return Boolean(robot);
+}
+
+function investigate(robot, elapsed, robots, player, map, sightRange, bus) {
+  const alert = robot.alert, wasSearching = alert.searching;
+  alert.flash = Math.max(0, alert.flash - elapsed);
+  robot.clock += elapsed;
+  while (!alert.searching && robot.clock >= PATROL_STEP) {
+    robot.clock -= PATROL_STEP;
+    const next = alert.route[0];
+    if (!next || !isWalkable(map, next.x, next.y) ||
+        Math.abs(next.x - robot.x) + Math.abs(next.y - robot.y) !== 1)
+      alert.route = planRoute(robot, map, alert.target) || [];
+    const point = alert.route.shift();
+    if (point) {
+      robot.facing = { x: point.x - robot.x, y: point.y - robot.y };
+      robot.x = point.x; robot.y = point.y;
+      if (detectPlayer(robots, player, map, sightRange, bus)) return true;
+    }
+    if (!alert.route.length) alert.searching = true;
+  }
+  if (alert.searching) {
+    const searchTime = Math.min(alert.searchLeft, wasSearching ? elapsed : robot.clock);
+    alert.searchLeft -= searchTime; alert.searchClock += searchTime;
+    robot.clock = 0;
+    while (alert.searchClock >= PATROL_STEP) {
+      alert.searchClock -= PATROL_STEP;
+      robot.facing = { x: -robot.facing.y, y: robot.facing.x };
+      if (detectPlayer(robots, player, map, sightRange, bus)) return true;
+    }
+    if (alert.searchLeft <= 1e-9) { delete robot.alert; robot.route = []; }
+  }
+  return false;
 }
 
 export function updateRobots(robots, dt, player, map, sightRange, bus) {
@@ -90,6 +155,10 @@ export function updateRobots(robots, dt, player, map, sightRange, bus) {
   if (detectPlayer(robots, player, map, sightRange, bus)) return;
   const elapsed = Number.isFinite(dt) ? Math.max(0, dt) : 0;
   for (const robot of robots) {
+    if (robot.alert) {
+      if (investigate(robot, elapsed, robots, player, map, sightRange, bus)) return;
+      continue;
+    }
     robot.clock = (robot.clock ?? 0) + elapsed;
     while (robot.clock >= PATROL_STEP) {
       robot.clock -= PATROL_STEP;
@@ -101,7 +170,7 @@ export function updateRobots(robots, dt, player, map, sightRange, bus) {
       const next = robot.route[0];
       if (!next || !isWalkable(map, next.x, next.y) ||
           Math.abs(next.x - robot.x) + Math.abs(next.y - robot.y) !== 1)
-        robot.route = planPatrol(robot, map);
+        robot.route = planRoute(robot, map);
       const point = robot.route.shift();
       if (!point) {
         robot.clock %= PATROL_STEP;
@@ -124,7 +193,7 @@ function drawVisionCone(ctx, robot, map, sightRange, camera) {
   const minY = Math.max(0, Math.floor(cy - radius), Math.floor(camera.y));
   const maxY = Math.min(map.height * T - 1, Math.ceil(cy + radius) - 1,
     Math.ceil(camera.y + (ctx.canvas?.height ?? map.height * T)) - 1);
-  ctx.fillStyle = "rgba(255, 98, 76, 0.16)";
+  ctx.fillStyle = robot.alert?.flash > 0 ? "rgba(255, 54, 54, 0.28)" : "rgba(215, 166, 83, 0.13)";
   for (let y = minY; y <= maxY; y++) {
     let run = -1;
     for (let x = minX; x <= maxX; x++) {
@@ -163,5 +232,10 @@ export function drawRobots(ctx, robots, map, sightRange, camera) {
     ctx.fillStyle = "rgba(255, 40, 58, 0.3)"; ctx.fillRect(eyeX - 1, eyeY - 1, 4, 4);
     ctx.fillStyle = "#ff334b"; ctx.fillRect(eyeX, eyeY, 2, 2);
     ctx.fillStyle = "#ffe2d8"; ctx.fillRect(eyeX, eyeY, 1, 1);
+    if (robot.alert) {
+      ctx.fillStyle = "#14271e"; ctx.fillRect(x + 5, y - 9, 6, 9);
+      ctx.fillStyle = "#ff7462"; ctx.fillRect(x + 7, y - 8, 2, 4);
+      ctx.fillRect(x + 7, y - 2, 2, 1);
+    }
   }
 }

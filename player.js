@@ -96,7 +96,7 @@ export function movePlayer(player, dx, dy, map) {
 export function activateGenerator(player, map, bus) {
   const generator = map.generators.find(g => !g.on && Math.abs(g.x - player.x) + Math.abs(g.y - player.y) <= 1);
   if (!generator) return false;
-  if (!tryGeneratorTiming(map, generator)) return true;
+  if (!tryGeneratorTiming(map, generator, bus)) return true;
   generator.on = true;
   bus.emit(EVENTS.GENERATOR_ON, { generator, map });
   if (map.generators.every(g => g.on)) bus.emit(EVENTS.ALL_GENERATORS_ON, { map });

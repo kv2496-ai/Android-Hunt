@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { TILE_SIZE, TILE, EVENTS, getDifficulty, isWalkable, isHidingSpot, createEventBus, emit, on } from "../shared.js";
 import { createLevel, updateGeneratorTiming, drawGeneratorTiming } from "../levels.js";
 import { createPlayer, movePlayer, activateGenerator } from "../player.js";
-import { createRobots, hasLineOfSight, canSeePlayer, updateRobots } from "../robots.js";
+import { createRobots, hasLineOfSight, canSeePlayer, updateRobots, drawRobots } from "../robots.js";
 import { createGame, startGame } from "../main.js";
 
 function room(width = 12, height = 12) {
@@ -114,17 +114,20 @@ test("desk hiding updates on spawn, movement, and failed wall moves", () => {
 });
 
 test("generator timing starts, resets on misses, and emits power only on a green hit", () => {
-  const map = room(), bus = createEventBus(), events = [];
+  const map = room(), bus = createEventBus(), events = [], alarms = [];
   bus.on(EVENTS.GENERATOR_ON, p => events.push(p.generator));
   bus.on(EVENTS.ALL_GENERATORS_ON, () => events.push("all"));
+  bus.on("generatorAlarm", p => alarms.push(p));
   const player = { x: 2, y: 3 };
   assert.equal(activateGenerator({ x: 3, y: 3 }, map, bus), false);
   assert.equal(activateGenerator(player, map, bus), true);
   assert.equal(map.generators[0].on, false);
   assert.deepEqual(events, []);
+  assert.deepEqual(alarms, [], "starting does not sound an alarm");
   updateGeneratorTiming(map, player, 0.1);
   assert.equal(activateGenerator(player, map, bus), true, "a miss is still a handled interaction");
   assert.equal(map.generators[0].on, false);
+  assert.deepEqual(alarms, [{ x: 2, y: 2 }], "miss uses the caller's bus and exact tile payload");
   updateGeneratorTiming(map, player, 0.325);
   assert.equal(activateGenerator(player, map, bus), true);
   assert.equal(activateGenerator({ x: 2, y: 2 }, map, bus), false);
@@ -134,6 +137,7 @@ test("generator timing starts, resets on misses, and emits power only on a green
   assert.equal(activateGenerator({ x: 8, y: 2 }, map, bus), true);
   assert.equal(activateGenerator({ x: 8, y: 2 }, map, bus), false);
   assert.deepEqual(events, [map.generators[0], map.generators[1], "all"]);
+  assert.equal(alarms.length, 1, "successful hits and already-powered generators do not alarm");
 });
 
 test("timing bar matches its green zone, resets, and cancels immediately when moving away", () => {
@@ -146,11 +150,12 @@ test("timing bar matches its green zone, resets, and cancels immediately when mo
   const draw = () => { rectangles.length = 0; drawGeneratorTiming(ctx, map, { x: 0, y: 0 }); return [...rectangles]; };
   activateGenerator(player, map, bus);
   const initial = draw();
-  assert.equal(initial.length, 4);
+  assert.equal(initial.length, 6);
   updateGeneratorTiming(map, player, 0.15);
   assert.notDeepEqual(draw(), initial, "marker advances");
   activateGenerator(player, map, bus);
-  assert.deepEqual(draw(), initial, "miss resets marker exactly");
+  assert.deepEqual(draw().slice(0, 4), initial.slice(0, 4), "miss resets marker exactly");
+  assert.ok(draw()[5].rect[2] < initial[5].rect[2], "wrong presses do not restart the countdown");
   updateGeneratorTiming(map, player, 0.325);
   const [,, zone, marker] = draw();
   assert.ok(marker.rect[0] >= zone.rect[0] && marker.rect[0] < zone.rect[0] + zone.rect[2]);
@@ -160,6 +165,175 @@ test("timing bar matches its green zone, resets, and cancels immediately when mo
   activateGenerator(player, map, bus);
   assert.deepEqual(draw(), initial, "returning starts a fresh attempt");
   assert.equal(map.generators[0].on, false);
+});
+
+test("timing countdown expires once at three seconds, cancels, and cannot be extended by misses", () => {
+  const map = room(), bus = createEventBus(), alarms = [], player = { x: 2, y: 3 };
+  bus.on("generatorAlarm", p => alarms.push(p));
+  const draw = () => {
+    const rectangles = [];
+    drawGeneratorTiming({ canvas: { width: 416, height: 288 }, fillRect: (...rect) => rectangles.push(rect) }, map, { x: 0, y: 0 });
+    return rectangles;
+  };
+  activateGenerator(player, map, bus);
+  assert.equal(draw()[5][2], 40);
+  updateGeneratorTiming(map, player, 1.5);
+  assert.equal(draw()[5][2], 20, "half the countdown remains at 1.5 seconds");
+  updateGeneratorTiming(map, player, 1.499);
+  assert.equal(alarms.length, 0);
+  assert.equal(draw().length, 6, "attempt remains active just before its deadline");
+  updateGeneratorTiming(map, player, 0.001);
+  assert.deepEqual(alarms, [{ x: 2, y: 2 }]);
+  assert.deepEqual(draw(), []);
+  assert.equal(map.generators[0].on, false);
+  updateGeneratorTiming(map, player, 30);
+  assert.equal(alarms.length, 1, "expired attempt never repeats its alarm");
+  activateGenerator(player, map, bus);
+  assert.equal(draw()[5][2], 40, "next E starts a fresh attempt");
+  updateGeneratorTiming(map, player, 2.8);
+  activateGenerator(player, map, bus);
+  assert.equal(alarms.length, 2);
+  updateGeneratorTiming(map, player, 0.2);
+  assert.equal(alarms.length, 3, "marker reset does not extend the original deadline");
+  assert.deepEqual(draw(), []);
+  activateGenerator(player, map, bus);
+  updateGeneratorTiming(map, { x: 2, y: 4 }, 3);
+  assert.equal(alarms.length, 3, "walking away cancels silently rather than timing out");
+  activateGenerator(player, map, bus);
+  updateGeneratorTiming(map, player, 0.325);
+  activateGenerator(player, map, bus);
+  updateGeneratorTiming(map, player, 3);
+  assert.equal(map.generators[0].on, true);
+  assert.equal(alarms.length, 3, "success removes the deadline");
+});
+
+test("controller timeout raises an alarm and redirects live robots without pausing play", () => {
+  const c = createGame(); c.action();
+  const map = room(); map.generators = [{ x: 5, y: 5, on: false }]; map.tiles[6][5] = TILE.DESK;
+  c.game.map = map; c.game.player = createPlayer(map);
+  Object.assign(c.game.player, { x: 5, y: 6, hidden: true });
+  c.game.robots = createRobots(map);
+  const alarms = []; c.bus.on("generatorAlarm", p => alarms.push(p));
+  c.action();
+  for (let i = 0; i < 59; i++) c.update(0.05);
+  assert.equal(alarms.length, 0);
+  c.update(0.05);
+  assert.deepEqual(alarms, [{ x: 5, y: 5 }]);
+  assert.equal(c.game.state, "playing");
+  assert.equal(map.generators[0].on, false);
+  assert.deepEqual(c.game.robots[0].alert.target, { x: 5, y: 5 });
+  c.dispose();
+});
+
+test("nearby robots investigate around walls, search for three seconds, then resume patrol", () => {
+  const map = room(24, 16), bus = createEventBus(), hidden = { x: 2, y: 12, hidden: true };
+  map.robotSpawns = [{ x: 5, y: 5 }, { x: 18, y: 5 }, { x: 19, y: 5 }];
+  for (let y = 1; y < map.height - 1; y++) if (y !== 8) map.tiles[y][6] = TILE.WALL;
+  const robots = createRobots(map), [near, edge, far] = robots;
+  let subscriptions = 0;
+  const subscribe = bus.on;
+  bus.on = (event, handler) => { if (event === "generatorAlarm") subscriptions++; return subscribe(event, handler); };
+  updateRobots(robots, 0, hidden, map, 4, bus);
+  bus.emit("generatorAlarm", { x: 8, y: 5 });
+  assert.deepEqual(near.alert.target, { x: 8, y: 5 });
+  assert.ok(near.alert.route.some(p => p.x === 6 && p.y === 8), "route uses the doorway");
+  assert.ok(edge.alert, "ten-tile radius is inclusive");
+  assert.equal(far.alert, undefined, "distant patrols ignore the sound");
+  const steps = near.alert.route.length;
+  for (let i = 0; i < steps; i++) {
+    const before = { x: near.x, y: near.y };
+    updateRobots(robots, 0.48, hidden, map, 4, bus);
+    assert.equal(Math.abs(near.x - before.x) + Math.abs(near.y - before.y), 1);
+    assert.ok(isWalkable(map, near.x, near.y));
+  }
+  assert.deepEqual({ x: near.x, y: near.y }, { x: 8, y: 5 });
+  assert.equal(near.alert.searching, true);
+  assert.equal(near.alert.searchLeft, 3, "search timer starts on arrival, not when alarm sounds");
+  for (let i = 0; i < 29; i++) updateRobots(robots, 0.1, hidden, map, 4, bus);
+  assert.ok(near.alert);
+  assert.deepEqual({ x: near.x, y: near.y }, { x: 8, y: 5 }, "search scans in place");
+  updateRobots(robots, 0.1, hidden, map, 4, bus);
+  assert.equal(near.alert, undefined);
+  updateRobots(robots, 0.48, hidden, map, 4, bus);
+  assert.notDeepEqual({ x: near.x, y: near.y }, { x: 8, y: 5 }, "normal patrol resumes");
+  assert.equal(subscriptions, 1, "no per-frame or per-detection subscriptions");
+});
+
+test("alerts retarget, remain isolated by bus, and replace stale floor context", () => {
+  const bus = createEventBus(), otherBus = createEventBus(), hidden = { x: 2, y: 8, hidden: true };
+  const map = room(), robots = createRobots(map);
+  updateRobots(robots, 0, hidden, map, 4, bus);
+  otherBus.emit("generatorAlarm", { x: 8, y: 2 });
+  assert.equal(robots[0].alert, undefined);
+  bus.emit("generatorAlarm", { x: 8, y: 2 });
+  updateRobots(robots, 0.48, hidden, map, 4, bus);
+  bus.emit("generatorAlarm", { x: 5, y: 5 });
+  assert.deepEqual(robots[0].alert.target, { x: 5, y: 5 });
+  assert.deepEqual(robots[0].alert.route.at(-1), { x: 5, y: 5 });
+  const oldAlert = robots[0].alert;
+  const nextMap = room(), nextRobots = createRobots(nextMap);
+  updateRobots(nextRobots, 0, hidden, nextMap, 4, bus);
+  bus.emit("generatorAlarm", { x: 8, y: 8 });
+  assert.equal(robots[0].alert, oldAlert, "new-floor alarm cannot retarget stale robots");
+  assert.equal(nextRobots[0].alert.searching, true, "already at source: start searching immediately");
+  bus.emit("generatorAlarm", { x: -1, y: 0 });
+  assert.deepEqual(nextRobots[0].alert.target, { x: 8, y: 8 }, "invalid alarm is ignored");
+  updateRobots(nextRobots, 3, hidden, nextMap, 4, bus);
+  assert.equal(nextRobots[0].alert, undefined);
+});
+
+test("an unreachable alarm searches locally instead of trapping a robot in investigation forever", () => {
+  const map = room(), bus = createEventBus(), hidden = { x: 2, y: 8, hidden: true };
+  for (const [x, y] of [[7, 2], [9, 2], [8, 1], [8, 3]]) map.tiles[y][x] = TILE.WALL;
+  const robots = createRobots(map), start = { x: robots[0].x, y: robots[0].y };
+  updateRobots(robots, 0, hidden, map, 4, bus);
+  bus.emit("generatorAlarm", { x: 8, y: 2 });
+  assert.equal(robots[0].alert.searching, true);
+  updateRobots(robots, 3, hidden, map, 4, bus);
+  assert.equal(robots[0].alert, undefined);
+  assert.deepEqual({ x: robots[0].x, y: robots[0].y }, start);
+  updateRobots(robots, 0.48, hidden, map, 4, bus);
+  assert.ok(isWalkable(map, robots[0].x, robots[0].y));
+  assert.notDeepEqual({ x: robots[0].x, y: robots[0].y }, start);
+});
+
+test("alerted robots still catch during investigation steps and search turns", () => {
+  for (const searching of [false, true]) {
+    const map = room(), bus = createEventBus();
+    map.robotSpawns = [searching ? { x: 5, y: 5 } : { x: 3, y: 5 }];
+    const robots = createRobots(map);
+    robots[0].facing = searching ? { x: 1, y: 0 } : { x: 0, y: -1 };
+    const player = searching ? { x: 5, y: 7, hidden: false } : { x: 4, y: 5, hidden: false };
+    let caught = 0; bus.on(EVENTS.CAUGHT, () => caught++);
+    updateRobots(robots, 0, player, map, 4, bus);
+    assert.equal(caught, 0);
+    bus.emit("generatorAlarm", { x: 5, y: 5 });
+    updateRobots(robots, 0.48, player, map, 4, bus);
+    assert.equal(caught, 1);
+  }
+});
+
+test("alerted robots show an exclamation mark and briefly red, still wall-clipped cones", () => {
+  const map = room(), bus = createEventBus(), robots = createRobots(map);
+  const hidden = { x: 2, y: 8, hidden: true };
+  updateRobots(robots, 0, hidden, map, 4, bus);
+  const draw = () => {
+    const rectangles = [];
+    drawRobots({ canvas: { width: 192, height: 192 }, fillRect(...rect) {
+      assert.ok(rect.every(Number.isInteger)); rectangles.push({ color: this.fillStyle, rect });
+    } }, robots, map, 4, { x: 0, y: 0 });
+    return rectangles;
+  };
+  assert.ok(draw().some(d => d.color === "rgba(215, 166, 83, 0.13)"));
+  bus.emit("generatorAlarm", { x: 8, y: 2 });
+  const alerted = draw();
+  assert.ok(alerted.some(d => d.color === "rgba(255, 54, 54, 0.28)"));
+  assert.ok(alerted.some(d => d.color === "#ff7462" && d.rect[1] < robots[0].y * TILE_SIZE));
+  updateRobots(robots, 1, hidden, map, 4, bus);
+  const settled = draw();
+  assert.ok(settled.some(d => d.color === "rgba(215, 166, 83, 0.13)"));
+  assert.equal(settled.some(d => d.color === "rgba(255, 54, 54, 0.28)"), false);
+  assert.ok(robots[0].alert, "exclamation remains after the brief flash");
 });
 
 test("catch requires range AND facing cone AND clear sight AND not hidden", () => {
@@ -363,7 +537,7 @@ test("play the actual first floor end-to-end with live patrols and normal moveme
   c.action(); assert.equal(c.game.level, 2); assert.equal(c.game.state, "playing");
 });
 
-function browserHarness() {
+function browserHarness({ AudioContext } = {}) {
   class Element {
     constructor() { this.listeners = {}; this.dataset = {}; this.children = []; }
     addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
@@ -393,6 +567,7 @@ function browserHarness() {
     set(target, key, value) { assert.ok(["fillStyle", "imageSmoothingEnabled"].includes(key)); target[key] = value; return true; },
   });
   const win = new Element(); win.HTMLButtonElement = Button;
+  win.AudioContext = AudioContext; win.document = doc; doc.defaultView = win;
   let nextFrame, time = 0;
   win.requestAnimationFrame = fn => { nextFrame = fn; };
   const c = startGame(doc, win);
@@ -404,6 +579,65 @@ function browserHarness() {
     up(code) { win.fire("keyup", { code }); },
   };
 }
+
+test("wrong E raises a real bus alarm, reuses UI alarm audio, and honors mute and hidden tabs", () => {
+  const frequencies = [];
+  class FakeAudioContext {
+    constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; }
+    createGain() { return { gain: { value: 0, setValueAtTime() {}, linearRampToValueAtTime() {},
+      exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {} }; }
+    createOscillator() { return { frequency: { setValueAtTime(value) { frequencies.push(value); },
+      exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {}, start() {}, stop() {} }; }
+    resume() { this.state = "running"; return Promise.resolve(); }
+    suspend() { this.state = "suspended"; return Promise.resolve(); }
+  }
+  const h = browserHarness({ AudioContext: FakeAudioContext });
+  h.doc.fire("pointerdown"); h.key("Enter"); h.frame();
+  const map = room(); h.c.game.map = map;
+  Object.assign(h.c.game.player, { x: 2, y: 3, hidden: false });
+  h.c.game.robots = [];
+  const alarms = []; h.c.bus.on("generatorAlarm", p => alarms.push(p));
+  h.key("KeyE"); h.frame();
+  assert.deepEqual(frequencies, [], "starting has no alarm audio");
+  h.key("KeyE"); h.frame();
+  assert.deepEqual(alarms, [{ x: 2, y: 2 }]);
+  assert.deepEqual(frequencies, [880, 660, 880], "reuse the existing three-tone alarm");
+  h.doc.fire("keydown", { code: "KeyM" });
+  h.key("KeyE"); h.frame();
+  assert.equal(frequencies.length, 3, "mute suppresses new alarms");
+  h.doc.fire("keydown", { code: "KeyM" }); h.frame();
+  assert.equal(frequencies.length, 3, "unmuting cannot replay a missed alarm");
+  h.c.bus.emit("generatorAlarm", { x: 2, y: 2 }); h.frame();
+  assert.equal(frequencies.length, 6, "external bus alarms also play the same sound");
+  for (let i = 0; i < 60; i++) h.frame(50);
+  assert.equal(map.generators[0].on, false);
+  assert.equal(alarms.length, 4, "timeout emits exactly one more alarm");
+  assert.equal(frequencies.length, 9, "timeout uses the same alarm sound");
+  h.doc.hidden = true; h.doc.fire("visibilitychange");
+  h.c.bus.emit("generatorAlarm", { x: 2, y: 2 }); h.frame();
+  assert.equal(frequencies.length, 9, "hidden tab cannot play alarms");
+  h.doc.hidden = false; h.doc.fire("visibilitychange"); h.doc.fire("pointerdown"); h.frame();
+  assert.equal(frequencies.length, 9, "returning to the tab cannot replay a hidden alarm");
+});
+
+test("wrong E immediately redirects robots through the default controller and countdown pauses in hidden tabs", () => {
+  const h = browserHarness(); h.key("Enter"); h.frame();
+  const map = room(); map.tiles[6][5] = TILE.DESK; map.generators = [{ x: 5, y: 5, on: false }];
+  h.c.game.map = map; h.c.game.player = createPlayer(map);
+  Object.assign(h.c.game.player, { x: 5, y: 6, hidden: true });
+  h.c.game.robots = createRobots(map);
+  const alarms = []; h.c.bus.on("generatorAlarm", p => alarms.push(p));
+  h.key("KeyE"); h.key("KeyE");
+  assert.deepEqual(alarms, [{ x: 5, y: 5 }]);
+  assert.deepEqual(h.c.game.robots[0].alert.target, { x: 5, y: 5 });
+  for (let i = 0; i < 40; i++) h.frame(50);
+  h.doc.hidden = true; h.doc.fire("visibilitychange");
+  for (let i = 0; i < 100; i++) h.frame(50);
+  assert.equal(alarms.length, 1, "hidden-tab wall time does not consume gameplay countdown");
+  h.doc.hidden = false; h.doc.fire("visibilitychange"); h.frame();
+  for (let i = 0; i < 20; i++) h.frame(50);
+  assert.equal(alarms.length, 2, "remaining active gameplay time reaches deadline");
+});
 
 test("E timing works through the browser entry while robots move, and leaving or capture interrupts it", () => {
   const h = browserHarness(); h.key("Enter"); h.frame();

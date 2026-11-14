@@ -1,4 +1,5 @@
 // Every canvas mark, including the lettering, is a colored rectangle.
+import { getAlarmCount } from "./robots.js";
 const glyphs = {
   A:"01110/10001/10001/11111/10001/10001/10001",
   B:"11110/10001/10001/11110/10001/10001/11110",
@@ -96,7 +97,7 @@ function createSounds(document) {
   const window = document.defaultView;
   const AudioContext = window?.AudioContext || window?.webkitAudioContext;
   let supported = !!AudioContext, context, output, muted = false;
-  let previousState = null, previousMap = null, previousPowered = 0, lastBuzz = -1;
+  let previousState = null, previousMap = null, previousPowered = 0, previousAlarms = 0, lastBuzz = -1;
   const voices = new Set();
   function stop() {
     for (const voice of voices) {
@@ -182,6 +183,7 @@ function createSounds(document) {
     get label() { return muted ? "M: SOUND OFF" : supported ? "M: SOUND ON" : "M: AUDIO N/A"; },
     update(game, presentation, time) {
       const powered = game.map.generators.filter(g => g.on).length;
+      const alarms = getAlarmCount(game.map);
       if (previousState !== game.state) {
         stop();
         lastBuzz = -1;
@@ -190,6 +192,8 @@ function createSounds(document) {
       }
       if (previousMap === game.map && powered > previousPowered)
         for (let i = 0; i < powered - previousPowered; i++) play("hum", i * 0.06);
+      if (game.state === "playing" && alarms > (previousMap === game.map ? previousAlarms : 0)) play("alarm");
+      previousAlarms = alarms;
       if (game.state === "title" && !presentation.reducedMotion) {
         const elapsed = time - presentation.titleStart;
         const phase = [[900, 1100], [1500, 1700], [2100, 2350], [2750, 3100]]

@@ -1,19 +1,26 @@
 // Seeded office floors: retries keep their layout, later floors add rooms and patrols.
-import { getDifficulty, TILE, TILE_SIZE } from "./shared.js";
+import { getDifficulty, TILE, TILE_SIZE, eventBus } from "./shared.js";
 
 const lighting = new WeakMap();
 const generatorTiming = new WeakMap();
+const TIMING_LIMIT = 3;
 const timingMarker = state => Math.round((1 - Math.abs(state.elapsed / 0.65 % 2 - 1)) * 39);
 
+function timingMiss(map, state, expired = false) {
+  if (expired) generatorTiming.delete(map);
+  else state.elapsed = 0;
+  state.bus.emit("generatorAlarm", { x: state.generator.x, y: state.generator.y });
+}
+
 /** First interaction starts; a miss resets; only a green-zone hit permits power. */
-export function tryGeneratorTiming(map, generator) {
+export function tryGeneratorTiming(map, generator, bus = eventBus) {
   const state = generatorTiming.get(map);
-  if (state?.generator !== generator) {
-    generatorTiming.set(map, { generator, elapsed: 0 });
+  if (state?.generator !== generator || state.bus !== bus) {
+    generatorTiming.set(map, { generator, elapsed: 0, age: 0, bus });
     return false;
   }
   const marker = timingMarker(state);
-  if (marker < 17 || marker > 23) { state.elapsed = 0; return false; }
+  if (marker < 17 || marker > 23) { timingMiss(map, state); return false; }
   generatorTiming.delete(map);
   return true;
 }
@@ -23,18 +30,26 @@ export function updateGeneratorTiming(map, player, dt = 0) {
   if (!state) return;
   if (state.generator.on || Math.abs(state.generator.x - player.x) + Math.abs(state.generator.y - player.y) > 1)
     generatorTiming.delete(map);
-  else state.elapsed += Math.max(0, dt);
+  else {
+    const elapsed = Number.isFinite(dt) ? Math.max(0, dt) : 0;
+    state.elapsed += elapsed;
+    state.age += elapsed;
+    if (state.age >= TIMING_LIMIT - 1e-9) timingMiss(map, state, true);
+  }
 }
 
 export function drawGeneratorTiming(ctx, map, camera) {
   const state = generatorTiming.get(map);
   if (!state) return;
   const x = Math.max(2, Math.min(ctx.canvas.width - 46, Math.round(state.generator.x * TILE_SIZE - camera.x) - 14));
-  const y = Math.max(2, Math.min(ctx.canvas.height - 10, Math.round(state.generator.y * TILE_SIZE - camera.y) - 12));
-  ctx.fillStyle = "#14271e"; ctx.fillRect(x, y, 44, 8);
+  const y = Math.max(22, Math.min(ctx.canvas.height - 32, Math.round(state.generator.y * TILE_SIZE - camera.y) - 12));
+  ctx.fillStyle = "#14271e"; ctx.fillRect(x, y, 44, 12);
   ctx.fillStyle = "#59634e"; ctx.fillRect(x + 2, y + 2, 40, 4);
   ctx.fillStyle = "#83b583"; ctx.fillRect(x + 19, y + 2, 7, 4);
   ctx.fillStyle = "#f2df9b"; ctx.fillRect(x + 2 + timingMarker(state), y + 1, 1, 6);
+  ctx.fillStyle = "#354b3d"; ctx.fillRect(x + 2, y + 9, 40, 2);
+  ctx.fillStyle = state.age > 2 ? "#e58b70" : "#e1c06b";
+  ctx.fillRect(x + 2, y + 9, Math.ceil(40 * Math.max(0, 1 - state.age / TIMING_LIMIT)), 2);
 }
 
 /** @returns {import("./shared.js").MapData} */
