@@ -77,8 +77,19 @@ export function pixelText(ctx, text, centerX, y, size = 1, color = "#e1ddae") {
 }
 
 function presentationFor(canvas) {
-  if (!presentations.has(canvas)) presentations.set(canvas, { state: null, titleStart: 0, reducedMotion: false });
+  if (!presentations.has(canvas)) presentations.set(canvas, {
+    state: null, level: null, map: null, titleStart: 0,
+    transitionStart: null, caughtStart: null, reducedMotion: false,
+  });
   return presentations.get(canvas);
+}
+
+function updatePresentation(presentation, state, level, time) {
+  if (presentation.state === state && presentation.level === level) return;
+  presentation.transitionStart = presentation.state === null ? null : time;
+  presentation.caughtStart = state === "caught" ? time : null;
+  presentation.state = state; presentation.level = level;
+  if (state === "title") presentation.titleStart = time;
 }
 
 function createSounds(document) {
@@ -223,10 +234,7 @@ function drawTitle(ctx, presentation, time) {
 export function drawOverlay(ctx, state, level) {
   const presentation = presentationFor(ctx.canvas);
   const time = globalThis.performance?.now() ?? Date.now();
-  if (presentation.state !== state) {
-    presentation.state = state;
-    if (state === "title") presentation.titleStart = time;
-  }
+  updatePresentation(presentation, state, level, time);
   if (state === "title") {
     drawTitle(ctx, presentation, time);
     return;
@@ -279,7 +287,41 @@ export function createUI(document, onAction) {
   const canvas = byId("game"), ctx = canvas.getContext?.("2d");
   const presentation = presentationFor(canvas), sounds = createSounds(document);
   presentation.sounds = sounds;
-  presentation.reducedMotion = !!document.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const motion = document.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)");
+  presentation.reducedMotion = !!motion?.matches;
+  const restingTransform = canvas.style?.transform || "";
+  function resetEffects() {
+    presentation.transitionStart = null; presentation.caughtStart = null;
+    if (canvas.style) canvas.style.transform = restingTransform;
+  }
+  function drawEffects(time) {
+    if (document.hidden || presentation.reducedMotion) { resetEffects(); return; }
+    const caughtAge = presentation.caughtStart === null ? Infinity : Math.max(0, time - presentation.caughtStart);
+    let transform = restingTransform;
+    if (caughtAge < 280) {
+      const [x, y] = [[4, -2], [-4, 2], [3, 1], [-2, -2], [1, 1], [-1, 0], [0, 0]][Math.floor(caughtAge / 40)];
+      transform = `${restingTransform && restingTransform !== "none" ? restingTransform + " " : ""}translate(${x}px, ${y}px)`;
+    } else presentation.caughtStart = null;
+    // CSS shifts the entire finished screen without resampling canvas pixels.
+    if (canvas.style && canvas.style.transform !== transform) canvas.style.transform = transform;
+    if (!ctx) return;
+    if (presentation.transitionStart !== null) {
+      const age = Math.max(0, time - presentation.transitionStart);
+      if (age < 260) {
+        ctx.fillStyle = `rgba(7, 13, 16, ${1 - age / 260})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      } else presentation.transitionStart = null;
+    }
+    if (caughtAge < 180) {
+      ctx.fillStyle = `rgba(231, 54, 45, ${0.3 * (1 - caughtAge / 180)})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) resetEffects(); });
+  document.defaultView?.addEventListener?.("blur", resetEffects);
+  motion?.addEventListener?.("change", event => {
+    presentation.reducedMotion = event.matches; resetEffects();
+  });
   canvas.setAttribute("aria-keyshortcuts", "M");
   let signature = "", generatorSignature = "";
   return {
@@ -288,9 +330,14 @@ export function createUI(document, onAction) {
       const powered = map.generators.filter(g => g.on).length;
       const allPowered = map.generators.length > 0 && powered === map.generators.length;
       const nearby = map.generators.some(g => !g.on && Math.abs(g.x - player.x) + Math.abs(g.y - player.y) <= 1);
-      sounds.update(game, presentation, globalThis.performance?.now() ?? Date.now());
+      const time = globalThis.performance?.now() ?? Date.now();
+      updatePresentation(presentation, state, level, time);
+      if (presentation.map && presentation.map !== map) presentation.transitionStart = time;
+      presentation.map = map;
+      sounds.update(game, presentation, time);
       // The controller draws the world and overlays before this update each frame.
       if (ctx && state === "playing") drawHUD(ctx, game, powered, nearby, sounds.label);
+      drawEffects(time);
       const timer = `SHIFT ${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`;
       if (byId("timer").textContent !== timer) byId("timer").textContent = timer;
       const powerSignature = `${level}/${map.generators.map(g => Number(g.on)).join()}`;
