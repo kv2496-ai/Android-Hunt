@@ -121,7 +121,8 @@ test("catch requires range AND facing cone AND clear sight AND not hidden", () =
   assert.equal(canSeePlayer(map, robot, { x: 8, y: 5, hidden: false }, 4), false);
   assert.equal(canSeePlayer(map, robot, { x: 2, y: 5, hidden: false }, 4), false);
   assert.equal(canSeePlayer(map, robot, { x: 4, y: 3, hidden: false }, 4), false);
-  assert.equal(canSeePlayer(map, robot, { x: 5, y: 3, hidden: false }, 4), true);
+  assert.equal(canSeePlayer(map, robot, { x: 5, y: 3, hidden: false }, 4), false);
+  assert.equal(canSeePlayer(map, robot, { x: 6, y: 4, hidden: false }, 4), true);
   assert.equal(canSeePlayer(map, robot, { x: 7, y: 5, hidden: true }, 4), false);
   map.tiles[5][5] = TILE.WALL;
   assert.equal(canSeePlayer(map, robot, { x: 7, y: 5, hidden: false }, 4), false);
@@ -131,13 +132,24 @@ test("catch requires range AND facing cone AND clear sight AND not hidden", () =
   assert.equal(canSeePlayer(map, robot, { x: 3, y: 5, hidden: true }, 4), false);
 });
 
-test("all cardinal facings and inclusive cone boundaries work", () => {
-  const map = room(), robot = { x: 5, y: 5 };
+test("all cardinal facings honor the 60-degree cone and inclusive range", () => {
+  const map = room(24, 24), robot = { x: 12, y: 12 };
   for (const facing of [{ x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 0, y: -1 }]) {
     robot.facing = facing;
-    assert.equal(canSeePlayer(map, robot, { x: 5 + facing.x * 3, y: 5 + facing.y * 3 }, 3), true);
-    assert.equal(canSeePlayer(map, robot, { x: 5 - facing.x, y: 5 - facing.y }, 3), false);
-    assert.equal(canSeePlayer(map, robot, { x: 5 + facing.x * 2 - facing.y * 2, y: 5 + facing.y * 2 + facing.x * 2 }, 3), true);
+    assert.equal(canSeePlayer(map, robot, { x: 12 + facing.x * 3, y: 12 + facing.y * 3 }, 3), true);
+    assert.equal(canSeePlayer(map, robot, { x: 12 + facing.x * 4, y: 12 + facing.y * 4 }, 3), false);
+    assert.equal(canSeePlayer(map, robot, { x: 12 - facing.x, y: 12 - facing.y }, 3), false);
+    for (const side of [-1, 1]) {
+      // Integer-tile rays just inside (29.74 degrees) and outside (30.96 degrees) each edge.
+      assert.equal(canSeePlayer(map, robot, {
+        x: 12 + facing.x * 7 - facing.y * 4 * side,
+        y: 12 + facing.y * 7 + facing.x * 4 * side,
+      }, 9), true);
+      assert.equal(canSeePlayer(map, robot, {
+        x: 12 + facing.x * 5 - facing.y * 3 * side,
+        y: 12 + facing.y * 5 + facing.x * 3 * side,
+      }, 9), false);
+    }
   }
 });
 
@@ -236,19 +248,67 @@ test("fresh controllers do not share level state or event listeners", () => {
 
 test("play the actual first floor end-to-end with live patrols and normal movement timing", () => {
   const c = createGame(); c.action();
-  function walkTo(target) {
-    const path = pathTo(c.game.map, c.game.player, target);
-    assert.ok(path);
-    for (const point of path) {
-      c.move(point.x - c.game.player.x, point.y - c.game.player.y);
-      for (const dt of [0.05, 0.05, 0.03]) c.update(dt);
-      assert.notEqual(c.game.state, "caught", `caught at ${JSON.stringify(point)}`);
+  const { map } = c.game, range = getDifficulty(1).sightRange;
+  const patrol = createRobots(map), bus = createEventBus(), frames = [], walls = [];
+  for (let y = 0; y < map.height; y++) for (let x = 0; x < map.width; x++)
+    if (map.tiles[y][x] === TILE.WALL) walls.push({ x, y });
+  const snapshot = () => patrol.map(({ x, y, facing }) => ({ x, y, facing: { ...facing } }));
+  // Predict live patrol poses, then plan movement/waits instead of assuming a fixed path is safe.
+  for (let turn = 0; turn < 220; turn++) {
+    const samples = [snapshot()];
+    for (const dt of [0.05, 0.05, 0.03]) {
+      updateRobots(patrol, dt, { ...map.playerSpawn, hidden: true }, map, range, bus);
+      samples.push(snapshot());
+    }
+    frames.push(samples);
+  }
+  const safe = (turn, x, y) => isHidingSpot(map, x, y) || frames[turn].every(samples => samples.every(robot => {
+    const dx = x - robot.x, dy = y - robot.y;
+    const angle = Math.abs(Math.atan2(dx * -robot.facing.y + dy * robot.facing.x,
+      dx * robot.facing.x + dy * robot.facing.y));
+    // Independent angle and closed-wall geometry, not canSeePlayer(), chooses safe steps.
+    const visible = Math.hypot(dx, dy) <= range && angle <= Math.PI / 6 &&
+      !walls.some(wall => segmentHitsWall(robot, { x, y }, wall.x, wall.y));
+    return !visible;
+  }));
+  const powerNear = (x, y, mask) => map.generators.reduce((bits, g, i) =>
+    Math.abs(g.x - x) + Math.abs(g.y - y) <= 1 ? bits | (1 << i) : bits, mask);
+  const all = (1 << map.generators.length) - 1;
+  const start = { ...map.playerSpawn, turn: 0, mask: powerNear(map.playerSpawn.x, map.playerSpawn.y, 0), previous: null };
+  const queue = [start], seen = new Set();
+  let goal;
+  for (let head = 0; head < queue.length; head++) {
+    const node = queue[head];
+    if (node.x === map.exit.x && node.y === map.exit.y && node.mask === all) { goal = node; break; }
+    if (node.turn >= frames.length) continue;
+    for (const [dx, dy] of [[1, 0], [0, -1], [-1, 0], [0, 1], [0, 0]]) {
+      const x = node.x + dx, y = node.y + dy;
+      if (!isWalkable(map, x, y) || !safe(node.turn, x, y)) continue;
+      const mask = powerNear(x, y, node.mask), turn = node.turn + 1;
+      const key = ((turn * map.height + y) * map.width + x) * (all + 1) + mask;
+      if (seen.has(key)) continue;
+      seen.add(key); queue.push({ x, y, turn, mask, previous: node });
     }
   }
-  // Visit the west generator, cross the upper office doors, then leave via the east office.
-  walkTo(c.game.map.generators[1]); c.action();
-  walkTo(c.game.map.generators[0]); c.action();
-  walkTo(c.game.map.exit);
+  assert.ok(goal, "a safe route must reach every generator and the exit with live patrols");
+  const path = [];
+  for (let node = goal; node.previous; node = node.previous) path.push(node);
+  function activateNearby() {
+    while (map.generators.some(g => !g.on && Math.abs(g.x - c.game.player.x) + Math.abs(g.y - c.game.player.y) <= 1)) {
+      c.action(); assert.notEqual(c.game.state, "caught");
+    }
+  }
+  activateNearby();
+  for (const point of path.reverse()) {
+    const dx = point.x - c.game.player.x, dy = point.y - c.game.player.y;
+    if (dx || dy) assert.equal(c.move(dx, dy), true);
+    activateNearby();
+    for (const dt of [0.05, 0.05, 0.03]) c.update(dt);
+    assert.notEqual(c.game.state, "caught", `caught at ${JSON.stringify({ x: point.x, y: point.y })}`);
+  }
+  assert.ok(map.generators.every(g => g.on));
+  assert.ok(c.game.elapsed > 0 && c.game.robots.some((r, i) =>
+    r.x !== map.robotSpawns[i].x || r.y !== map.robotSpawns[i].y), "patrols must remain active");
   assert.equal(c.game.state, "win");
   c.action(); assert.equal(c.game.level, 2); assert.equal(c.game.state, "playing");
 });
