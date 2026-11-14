@@ -1,5 +1,5 @@
 import { TILE_SIZE, getDifficulty, createEventBus, EVENTS } from "./shared.js";
-import { createLevel } from "./levels.js";
+import { createLevel, updateGeneratorTiming, drawGeneratorTiming } from "./levels.js";
 import { drawWorld } from "./world.js";
 import { createPlayer, movePlayer, activateGenerator, drawPlayer } from "./player.js";
 import { createRobots, updateRobots, detectPlayer, drawRobots } from "./robots.js";
@@ -66,6 +66,7 @@ export function createGame(bus = createEventBus()) {
       if (game.state !== "playing") return;
       const step = Math.min(Math.max(dt, 0), 0.05);
       game.elapsed += step;
+      updateGeneratorTiming(game.map, game.player, step);
       updateRobots(game.robots, step, game.player, game.map, difficulty.sightRange, bus);
       checkOutcome();
     },
@@ -136,6 +137,7 @@ export function startGame(document, window) {
     drawWorld(ctx, game.map, camera);
     drawRobots(ctx, game.robots, game.map, getDifficulty(game.level).sightRange, camera);
     drawPlayer(ctx, game.player, camera);
+    if (game.state === "playing") drawGeneratorTiming(ctx, game.map, camera);
     drawOverlay(ctx, game.state, game.level);
     ui.update(game);
     window.requestAnimationFrame(frame);

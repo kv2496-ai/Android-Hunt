@@ -1,5 +1,6 @@
 // Player movement, interaction, and rectangle-only pixel art.
 import { TILE_SIZE as T, isWalkable, isHidingSpot, EVENTS } from "./shared.js";
+import { tryGeneratorTiming, updateGeneratorTiming } from "./levels.js";
 
 // Animate pixels only: collision, cover, and objectives always use integer tiles.
 const STEP_MS = 120;
@@ -79,6 +80,7 @@ export function movePlayer(player, dx, dy, map) {
   };
   player.x += dx; player.y += dy;
   updateHiding(player, map, state, time);
+  updateGeneratorTiming(map, player);
   if (!sneaking && !player.hidden) {
     state.dust = state.dust.filter(p => time - p.born < DUST_MS).slice(-10);
     for (const side of [-1, 1]) state.dust.push({
@@ -94,6 +96,7 @@ export function movePlayer(player, dx, dy, map) {
 export function activateGenerator(player, map, bus) {
   const generator = map.generators.find(g => !g.on && Math.abs(g.x - player.x) + Math.abs(g.y - player.y) <= 1);
   if (!generator) return false;
+  if (!tryGeneratorTiming(map, generator)) return true;
   generator.on = true;
   bus.emit(EVENTS.GENERATOR_ON, { generator, map });
   if (map.generators.every(g => g.on)) bus.emit(EVENTS.ALL_GENERATORS_ON, { map });

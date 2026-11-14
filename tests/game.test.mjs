@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TILE_SIZE, TILE, EVENTS, getDifficulty, isWalkable, isHidingSpot, createEventBus, emit, on } from "../shared.js";
-import { createLevel } from "../levels.js";
+import { createLevel, updateGeneratorTiming, drawGeneratorTiming } from "../levels.js";
 import { createPlayer, movePlayer, activateGenerator } from "../player.js";
 import { createRobots, hasLineOfSight, canSeePlayer, updateRobots } from "../robots.js";
 import { createGame, startGame } from "../main.js";
@@ -103,16 +103,53 @@ test("desk hiding updates on spawn, movement, and failed wall moves", () => {
   assert.equal(movePlayer(player, 1, 1, map), false);
 });
 
-test("generator interaction is orthogonal, idempotent, and emits final-power once", () => {
+test("generator timing starts, resets on misses, and emits power only on a green hit", () => {
   const map = room(), bus = createEventBus(), events = [];
   bus.on(EVENTS.GENERATOR_ON, p => events.push(p.generator));
   bus.on(EVENTS.ALL_GENERATORS_ON, () => events.push("all"));
+  const player = { x: 2, y: 3 };
   assert.equal(activateGenerator({ x: 3, y: 3 }, map, bus), false);
-  assert.equal(activateGenerator({ x: 2, y: 3 }, map, bus), true);
+  assert.equal(activateGenerator(player, map, bus), true);
+  assert.equal(map.generators[0].on, false);
+  assert.deepEqual(events, []);
+  updateGeneratorTiming(map, player, 0.1);
+  assert.equal(activateGenerator(player, map, bus), true, "a miss is still a handled interaction");
+  assert.equal(map.generators[0].on, false);
+  updateGeneratorTiming(map, player, 0.325);
+  assert.equal(activateGenerator(player, map, bus), true);
   assert.equal(activateGenerator({ x: 2, y: 2 }, map, bus), false);
+  assert.equal(activateGenerator({ x: 8, y: 2 }, map, bus), true);
+  assert.equal(map.generators[1].on, false);
+  updateGeneratorTiming(map, { x: 8, y: 2 }, 0.325);
   assert.equal(activateGenerator({ x: 8, y: 2 }, map, bus), true);
   assert.equal(activateGenerator({ x: 8, y: 2 }, map, bus), false);
   assert.deepEqual(events, [map.generators[0], map.generators[1], "all"]);
+});
+
+test("timing bar matches its green zone, resets, and cancels immediately when moving away", () => {
+  const map = room(), player = createPlayer(map), bus = createEventBus();
+  Object.assign(player, { x: 2, y: 3 });
+  const rectangles = [];
+  const ctx = { canvas: { width: 416, height: 288 }, fillRect(...rect) {
+    assert.ok(rect.every(Number.isInteger)); rectangles.push({ color: this.fillStyle, rect });
+  } };
+  const draw = () => { rectangles.length = 0; drawGeneratorTiming(ctx, map, { x: 0, y: 0 }); return [...rectangles]; };
+  activateGenerator(player, map, bus);
+  const initial = draw();
+  assert.equal(initial.length, 4);
+  updateGeneratorTiming(map, player, 0.15);
+  assert.notDeepEqual(draw(), initial, "marker advances");
+  activateGenerator(player, map, bus);
+  assert.deepEqual(draw(), initial, "miss resets marker exactly");
+  updateGeneratorTiming(map, player, 0.325);
+  const [,, zone, marker] = draw();
+  assert.ok(marker.rect[0] >= zone.rect[0] && marker.rect[0] < zone.rect[0] + zone.rect[2]);
+  assert.equal(movePlayer(player, 0, 1, map), true);
+  assert.deepEqual(draw(), [], "leaving interaction range cancels without waiting for a frame");
+  movePlayer(player, 0, -1, map);
+  activateGenerator(player, map, bus);
+  assert.deepEqual(draw(), initial, "returning starts a fresh attempt");
+  assert.equal(map.generators[0].on, false);
 });
 
 test("catch requires range AND facing cone AND clear sight AND not hidden", () => {
@@ -271,40 +308,43 @@ test("play the actual first floor end-to-end with live patrols and normal moveme
       !walls.some(wall => segmentHitsWall(robot, { x, y }, wall.x, wall.y));
     return !visible;
   }));
-  const powerNear = (x, y, mask) => map.generators.reduce((bits, g, i) =>
-    Math.abs(g.x - x) + Math.abs(g.y - y) <= 1 ? bits | (1 << i) : bits, mask);
   const all = (1 << map.generators.length) - 1;
-  const start = { ...map.playerSpawn, turn: 0, mask: powerNear(map.playerSpawn.x, map.playerSpawn.y, 0), previous: null };
+  const start = { ...map.playerSpawn, turn: 0, mask: 0, previous: null };
   const queue = [start], seen = new Set();
   let goal;
   for (let head = 0; head < queue.length; head++) {
     const node = queue[head];
     if (node.x === map.exit.x && node.y === map.exit.y && node.mask === all) { goal = node; break; }
     if (node.turn >= frames.length) continue;
-    for (const [dx, dy] of [[1, 0], [0, -1], [-1, 0], [0, 1], [0, 0]]) {
-      const x = node.x + dx, y = node.y + dy;
-      if (!isWalkable(map, x, y) || !safe(node.turn, x, y)) continue;
-      const mask = powerNear(x, y, node.mask), turn = node.turn + 1;
+    const options = [[1, 0], [0, -1], [-1, 0], [0, 1], [0, 0]].map(([dx, dy]) =>
+      ({ x: node.x + dx, y: node.y + dy, mask: node.mask, turns: 1 }));
+    map.generators.forEach((g, i) => {
+      if (!(node.mask & (1 << i)) && Math.abs(g.x - node.x) + Math.abs(g.y - node.y) <= 1)
+        options.push({ x: node.x, y: node.y, mask: node.mask | (1 << i), turns: 3, generator: i });
+    });
+    for (const { x, y, mask, turns, generator } of options) {
+      const turn = node.turn + turns;
+      if (turn > frames.length || !isWalkable(map, x, y) ||
+          !Array.from({ length: turns }, (_, i) => safe(node.turn + i, x, y)).every(Boolean)) continue;
       const key = ((turn * map.height + y) * map.width + x) * (all + 1) + mask;
       if (seen.has(key)) continue;
-      seen.add(key); queue.push({ x, y, turn, mask, previous: node });
+      seen.add(key); queue.push({ x, y, turn, mask, generator, previous: node });
     }
   }
   assert.ok(goal, "a safe route must reach every generator and the exit with live patrols");
   const path = [];
   for (let node = goal; node.previous; node = node.previous) path.push(node);
-  function activateNearby() {
-    while (map.generators.some(g => !g.on && Math.abs(g.x - c.game.player.x) + Math.abs(g.y - c.game.player.y) <= 1)) {
-      c.action(); assert.notEqual(c.game.state, "caught");
-    }
-  }
-  activateNearby();
   for (const point of path.reverse()) {
     const dx = point.x - c.game.player.x, dy = point.y - c.game.player.y;
     if (dx || dy) assert.equal(c.move(dx, dy), true);
-    activateNearby();
-    for (const dt of [0.05, 0.05, 0.03]) c.update(dt);
+    if (point.generator !== undefined) c.action();
+    for (let turn = point.previous.turn; turn < point.turn; turn++)
+      for (const dt of [0.05, 0.05, 0.03]) c.update(dt);
     assert.notEqual(c.game.state, "caught", `caught at ${JSON.stringify({ x: point.x, y: point.y })}`);
+    if (point.generator !== undefined) {
+      c.action();
+      assert.equal(map.generators[point.generator].on, true, "timed activation succeeds with live patrols");
+    }
   }
   assert.ok(map.generators.every(g => g.on));
   assert.ok(c.game.elapsed > 0 && c.game.robots.some((r, i) =>
@@ -354,6 +394,41 @@ function browserHarness() {
     up(code) { win.fire("keyup", { code }); },
   };
 }
+
+test("E timing works through the browser entry while robots move, and leaving or capture interrupts it", () => {
+  const h = browserHarness(); h.key("Enter"); h.frame();
+  const map = room(); h.c.game.map = map; h.c.game.player = createPlayer(map);
+  Object.assign(h.c.game.player, { x: 2, y: 3 });
+  h.c.game.robots = [{ x: 8, y: 8, facing: { x: 1, y: 0 }, clock: 0.47 }];
+  let powered = 0; h.c.bus.on(EVENTS.GENERATOR_ON, () => powered++);
+  const markerDraws = [];
+  const draw = h.ctx.fillRect;
+  h.ctx.fillRect = function (...rect) {
+    if (this.fillStyle === "#f2df9b") markerDraws.push(rect);
+    draw.call(this, ...rect);
+  };
+  h.key("KeyE");
+  assert.equal(map.generators[0].on, false, "E starts rather than powers");
+  for (let i = 0; i < 20; i++) h.frame();
+  assert.ok(markerDraws.length >= 20, "active marker renders every frame");
+  assert.notDeepEqual(markerDraws[0], markerDraws.at(-1), "marker moves");
+  assert.notEqual(h.c.game.robots[0].x, 8, "patrol keeps moving during the mini-game");
+  h.key("KeyE"); h.key("KeyE", true);
+  assert.equal(map.generators[0].on, true); assert.equal(powered, 1);
+  Object.assign(h.c.game.player, { x: 8, y: 3 });
+  h.key("KeyE");
+  h.key("ArrowDown"); h.frame(); h.up("ArrowDown");
+  const rectangles = [];
+  drawGeneratorTiming({ canvas: h.canvas, fillRect: (...rect) => rectangles.push(rect) }, map, { x: 0, y: 0 });
+  assert.deepEqual(rectangles, [], "walking out of range immediately removes the bar");
+  h.key("ArrowUp"); h.frame(); h.up("ArrowUp"); h.key("KeyE");
+  h.c.game.robots = [{ x: 8, y: 3, facing: { x: 1, y: 0 }, clock: 0 }];
+  h.frame(); assert.equal(h.c.game.state, "caught");
+  assert.equal(map.generators[1].on, false, "mini-game does not protect against capture");
+  h.key("Enter");
+  drawGeneratorTiming({ canvas: h.canvas, fillRect: (...rect) => rectangles.push(rect) }, h.c.game.map, { x: 0, y: 0 });
+  assert.deepEqual(rectangles, [], "retry has no stale mini-game");
+});
 
 test("real browser entry renders every state using rectangles and unsmoothed pixels", () => {
   const h = browserHarness(); h.frame();

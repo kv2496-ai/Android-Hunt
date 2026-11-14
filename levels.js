@@ -2,6 +2,40 @@
 import { getDifficulty, TILE, TILE_SIZE } from "./shared.js";
 
 const lighting = new WeakMap();
+const generatorTiming = new WeakMap();
+const timingMarker = state => Math.round((1 - Math.abs(state.elapsed / 0.65 % 2 - 1)) * 39);
+
+/** First interaction starts; a miss resets; only a green-zone hit permits power. */
+export function tryGeneratorTiming(map, generator) {
+  const state = generatorTiming.get(map);
+  if (state?.generator !== generator) {
+    generatorTiming.set(map, { generator, elapsed: 0 });
+    return false;
+  }
+  const marker = timingMarker(state);
+  if (marker < 17 || marker > 23) { state.elapsed = 0; return false; }
+  generatorTiming.delete(map);
+  return true;
+}
+
+export function updateGeneratorTiming(map, player, dt = 0) {
+  const state = generatorTiming.get(map);
+  if (!state) return;
+  if (state.generator.on || Math.abs(state.generator.x - player.x) + Math.abs(state.generator.y - player.y) > 1)
+    generatorTiming.delete(map);
+  else state.elapsed += Math.max(0, dt);
+}
+
+export function drawGeneratorTiming(ctx, map, camera) {
+  const state = generatorTiming.get(map);
+  if (!state) return;
+  const x = Math.max(2, Math.min(ctx.canvas.width - 46, Math.round(state.generator.x * TILE_SIZE - camera.x) - 14));
+  const y = Math.max(2, Math.min(ctx.canvas.height - 10, Math.round(state.generator.y * TILE_SIZE - camera.y) - 12));
+  ctx.fillStyle = "#14271e"; ctx.fillRect(x, y, 44, 8);
+  ctx.fillStyle = "#59634e"; ctx.fillRect(x + 2, y + 2, 40, 4);
+  ctx.fillStyle = "#83b583"; ctx.fillRect(x + 19, y + 2, 7, 4);
+  ctx.fillStyle = "#f2df9b"; ctx.fillRect(x + 2 + timingMarker(state), y + 1, 1, 6);
+}
 
 /** @returns {import("./shared.js").MapData} */
 export function createLevel(level) {
