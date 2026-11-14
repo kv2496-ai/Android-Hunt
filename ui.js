@@ -89,7 +89,7 @@ function drawTitle(ctx, presentation, time) {
     (elapsed >= 1700 && elapsed < 2100) || (elapsed >= 2350 && elapsed < 2750);
   ctx.fillStyle = lightsOn ? "rgba(255, 245, 203, 0.38)" : "#070d10";
   ctx.fillRect(0, 0, width, height);
-  for (let x = 36; x < width - 20; x += 96) {
+  for (let x = 36; x + 50 <= width - 20; x += 96) {
     ctx.fillStyle = lightsOn ? "#667365" : "#18221f";
     ctx.fillRect(x - 2, 17, 52, 7);
     ctx.fillStyle = lightsOn ? "#fff4c5" : "#26342a";
