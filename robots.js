@@ -1,5 +1,5 @@
 // Robot patrols, wall-occluded vision, and rectangle-only pixel sprites.
-import { TILE_SIZE as T, TILE, isWalkable, EVENTS } from "./shared.js";
+import { TILE_SIZE as T, isWalkable, EVENTS } from "./shared.js";
 
 const PATROL_STEP = 0.48;
 const CONE_COSINE = Math.cos(Math.PI / 6);
@@ -40,15 +40,22 @@ function planPatrol(robot, map) {
 
 /** Supercover grid ray: walls block sight, including diagonal wall corners. Desks do not. */
 export function hasLineOfSight(map, from, to) {
-  let x = from.x, y = from.y;
-  const dx = to.x - x, dy = to.y - y;
+  return clearSight(map, from.x, from.y, to.x, to.y);
+}
+
+// Tile centers have integer coordinates; fractional endpoints are used only for drawing.
+function clearSight(map, fromX, fromY, toX, toY) {
+  let x = Math.floor(fromX + 0.5), y = Math.floor(fromY + 0.5);
+  const endX = Math.floor(toX + 0.5), endY = Math.floor(toY + 0.5);
+  const dx = toX - fromX, dy = toY - fromY;
   const sx = Math.sign(dx), sy = Math.sign(dy);
   const stepX = dx ? 1 / Math.abs(dx) : Infinity;
   const stepY = dy ? 1 / Math.abs(dy) : Infinity;
-  let nextX = stepX / 2, nextY = stepY / 2;
-  const wall = (cx, cy) => !isWalkable(map, cx, cy) || map.tiles[cy][cx] === TILE.WALL;
-  if (wall(x, y) || wall(to.x, to.y)) return false;
-  while (x !== to.x || y !== to.y) {
+  let nextX = dx ? (x + sx * 0.5 - fromX) / dx : Infinity;
+  let nextY = dy ? (y + sy * 0.5 - fromY) / dy : Infinity;
+  const wall = (cx, cy) => !isWalkable(map, cx, cy);
+  if (wall(x, y) || wall(endX, endY)) return false;
+  while (x !== endX || y !== endY) {
     if (Math.abs(nextX - nextY) < 1e-9) {
       if (wall(x + sx, y) || wall(x, y + sy)) return false;
       x += sx; y += sy; nextX += stepX; nextY += stepY;
@@ -108,21 +115,53 @@ export function updateRobots(robots, dt, player, map, sightRange, bus) {
   detectPlayer(robots, player, map, sightRange, bus);
 }
 
-export function drawRobots(ctx, robots, map, sightRange, camera) {
-  for (const robot of robots) {
-    ctx.fillStyle = "rgba(215, 166, 83, 0.13)";
-    for (let y = Math.max(1, robot.y - sightRange); y <= Math.min(map.height - 2, robot.y + sightRange); y++) {
-      for (let x = Math.max(1, robot.x - sightRange); x <= Math.min(map.width - 2, robot.x + sightRange); x++) {
-        if (canSeePlayer(map, robot, { x, y, hidden: false }, sightRange))
-          ctx.fillRect(x * T - camera.x + 1, y * T - camera.y + 1, T - 2, T - 2);
+/** Rasterize the actual cone as horizontal pixel runs, clipped by walls and the viewport. */
+function drawVisionCone(ctx, robot, map, sightRange, camera) {
+  const cx = (robot.x + 0.5) * T, cy = (robot.y + 0.5) * T, radius = sightRange * T;
+  const minX = Math.max(0, Math.floor(cx - radius), Math.floor(camera.x));
+  const maxX = Math.min(map.width * T - 1, Math.ceil(cx + radius) - 1,
+    Math.ceil(camera.x + (ctx.canvas?.width ?? map.width * T)) - 1);
+  const minY = Math.max(0, Math.floor(cy - radius), Math.floor(camera.y));
+  const maxY = Math.min(map.height * T - 1, Math.ceil(cy + radius) - 1,
+    Math.ceil(camera.y + (ctx.canvas?.height ?? map.height * T)) - 1);
+  ctx.fillStyle = "rgba(255, 98, 76, 0.16)";
+  for (let y = minY; y <= maxY; y++) {
+    let run = -1;
+    for (let x = minX; x <= maxX; x++) {
+      const dx = x + 0.5 - cx, dy = y + 0.5 - cy, distanceSquared = dx * dx + dy * dy;
+      const forward = dx * robot.facing.x + dy * robot.facing.y;
+      const visible = distanceSquared <= radius * radius && forward >= 0 &&
+        forward * forward >= distanceSquared * CONE_COSINE * CONE_COSINE - 1e-9 &&
+        clearSight(map, robot.x, robot.y, (x + 0.5) / T - 0.5, (y + 0.5) / T - 0.5);
+      if (visible && run < 0) run = x;
+      if (!visible && run >= 0) {
+        ctx.fillRect(run - camera.x, y - camera.y, x - run, 1);
+        run = -1;
       }
     }
+    if (run >= 0) ctx.fillRect(run - camera.x, y - camera.y, maxX + 1 - run, 1);
+  }
+}
+
+export function drawRobots(ctx, robots, map, sightRange, camera) {
+  for (const robot of robots) drawVisionCone(ctx, robot, map, sightRange, camera);
+  // Keep every sprite above every cone, even where patrols overlap.
+  for (const robot of robots) {
     const x = robot.x * T - camera.x, y = robot.y * T - camera.y;
-    ctx.fillStyle = "#14271e"; ctx.fillRect(x + 3, y + 12, 11, 3);
-    ctx.fillStyle = "#a45c46"; ctx.fillRect(x + 4, y + 6, 9, 7);
-    ctx.fillStyle = "#ce9270"; ctx.fillRect(x + 4, y + 2, 9, 6);
-    ctx.fillStyle = "#533b30"; ctx.fillRect(x + 5, y + 4, 7, 2);
-    ctx.fillStyle = "#f1cf80"; ctx.fillRect(x + 7 + robot.facing.x * 2, y + 4 + robot.facing.y, 2, 2);
-    ctx.fillStyle = "#a4ac89"; ctx.fillRect(x + 4, y + 13, 3, 2); ctx.fillRect(x + 10, y + 13, 3, 2);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.45)"; ctx.fillRect(x + 2, y + 13, 13, 3);
+    ctx.fillStyle = "#19232d"; ctx.fillRect(x + 3, y + 1, 10, 12);
+    ctx.fillRect(x + 2, y + 8, 2, 4); ctx.fillRect(x + 12, y + 8, 2, 4);
+    ctx.fillStyle = "#82939c"; ctx.fillRect(x + 4, y + 2, 8, 5);
+    ctx.fillStyle = "#b9c7ca"; ctx.fillRect(x + 4, y + 2, 8, 1);
+    ctx.fillStyle = "#526773"; ctx.fillRect(x + 4, y + 8, 8, 5);
+    ctx.fillStyle = "#d18d52"; ctx.fillRect(x + 5, y + 8, 2, 3);
+    ctx.fillStyle = "#111b24"; ctx.fillRect(x + 5, y + 4, 6, 2);
+    ctx.fillRect(x + 4, y + 13, 3, 2); ctx.fillRect(x + 9, y + 13, 3, 2);
+    ctx.fillStyle = "#81929b"; ctx.fillRect(x + 4, y + 13, 2, 1); ctx.fillRect(x + 9, y + 13, 2, 1);
+    const eyeX = x + 7 + robot.facing.x * 3, eyeY = y + 4 + robot.facing.y * 2;
+    ctx.fillStyle = "rgba(255, 40, 58, 0.16)"; ctx.fillRect(eyeX - 3, eyeY - 2, 8, 6);
+    ctx.fillStyle = "rgba(255, 40, 58, 0.3)"; ctx.fillRect(eyeX - 1, eyeY - 1, 4, 4);
+    ctx.fillStyle = "#ff334b"; ctx.fillRect(eyeX, eyeY, 2, 2);
+    ctx.fillStyle = "#ffe2d8"; ctx.fillRect(eyeX, eyeY, 1, 1);
   }
 }
