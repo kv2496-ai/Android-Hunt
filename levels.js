@@ -99,18 +99,22 @@ export function createLevel(level) {
     { x: width - 4, y: height - 4 }, { x: 11, y: height - 4 },
     { x: 11, y: 3 },
   ];
-  const generators = candidates.slice(0, difficulty.numGenerators)
-    .map(p => ({ ...reserveNear(p), on: false }));
+  const generators = Array.from({ length: difficulty.numGenerators }, (_, i) => ({
+    ...reserveNear(candidates[i] || cells[Math.floor(random() * cells.length)]), on: false,
+  }));
   const robotSpawns = Array.from({ length: difficulty.numRobots }, (_, i) =>
     reserveNear({ x: 11 + (i % 3) * 3, y: 6 + Math.floor(i / 3) * 3 },
       p => Math.hypot(p.x - playerSpawn.x, p.y - playerSpawn.y) > difficulty.sightRange + 2));
-  // An exact density budget avoids unlucky floors with almost no hiding places.
+  // Keep density-based cover, with a minimum budget for the extra objectives and patrols.
   const deskCells = cells.filter(p => !reserved.has(key(p)));
   for (let i = deskCells.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
     [deskCells[i], deskCells[j]] = [deskCells[j], deskCells[i]];
   }
-  const deskCount = Math.max(1, Math.round(cells.length * difficulty.deskDensity));
+  const deskCount = Math.min(deskCells.length + 1, Math.max(
+    Math.round(cells.length * difficulty.deskDensity),
+    difficulty.numGenerators * 3 + difficulty.numRobots,
+  ));
   for (const p of deskCells.slice(0, deskCount - 1)) tiles[p.y][p.x] = TILE.DESK;
   // A desk beside the spawn teaches hiding without a tutorial popup.
   tiles[tutorialDesk.y][tutorialDesk.x] = TILE.DESK;

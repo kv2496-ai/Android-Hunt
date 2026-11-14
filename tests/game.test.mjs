@@ -53,7 +53,17 @@ test("shared tile helpers follow the exact floor/wall/desk contract", () => {
 
 test("difficulty grows and stays bounded at its heaviest configuration", () => {
   assert.deepEqual(getDifficulty(1), { mapW: 24, mapH: 16, numGenerators: 2, numRobots: 1, deskDensity: 0.15, sightRange: 4 });
-  assert.deepEqual(getDifficulty(1000), { mapW: 32, mapH: 22, numGenerators: 5, numRobots: 5, deskDensity: 0.08, sightRange: 7 });
+  assert.deepEqual(getDifficulty(2), { mapW: 26, mapH: 18, numGenerators: 4, numRobots: 2, deskDensity: 0.145, sightRange: 4 });
+  assert.deepEqual(getDifficulty(1000), { mapW: 32, mapH: 22, numGenerators: 15, numRobots: 10, deskDensity: 0.08, sightRange: 7 });
+  for (const level of [...Array.from({ length: 12 }, (_, i) => i + 1), 1000, Number.MAX_SAFE_INTEGER, Number.MAX_VALUE, Infinity]) {
+    const d = getDifficulty(level), map = createLevel(level);
+    assert.equal(d.numGenerators, Math.min(15, 2 + (level - 1) * 2));
+    assert.equal(d.numRobots, Math.min(10, level));
+    assert.equal(map.generators.length, d.numGenerators);
+    assert.equal(map.robotSpawns.length, d.numRobots);
+    assert.ok(d.mapW <= 32 && d.mapH <= 22);
+    assert.ok(map.tiles.flat().filter(tile => tile === TILE.DESK).length >= d.numGenerators * 3 + d.numRobots);
+  }
   assert.deepEqual(getDifficulty(-3), getDifficulty(1));
   assert.deepEqual(getDifficulty("bad"), getDifficulty(1));
 });

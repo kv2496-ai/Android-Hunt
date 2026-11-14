@@ -25,10 +25,10 @@ export const EVENTS = Object.freeze({
 export function getDifficulty(level) {
   const n = Math.max(1, Math.floor(Number(level) || 1));
   return {
-    mapW: Math.min(32, 24 + 2 * Math.floor((n - 1) / 2)),
-    mapH: Math.min(22, 16 + 2 * Math.floor((n - 1) / 3)),
-    numGenerators: Math.min(5, 2 + Math.floor((n - 1) / 2)),
-    numRobots: Math.min(5, 1 + Math.floor(n / 2)),
+    mapW: Math.min(32, 24 + 2 * (n - 1)),
+    mapH: Math.min(22, 16 + 2 * (n - 1)),
+    numGenerators: Math.min(15, 2 + 2 * (n - 1)),
+    numRobots: Math.min(10, n),
     deskDensity: Math.max(0.08, 0.15 - (n - 1) * 0.005),
     sightRange: Math.min(7, 4 + Math.floor((n - 1) / 3)),
   };
