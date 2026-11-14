@@ -1,8 +1,41 @@
-// Person B lane. TODO: Replace the clockwise fallback patrol with authored routes.
+// Robot patrols, wall-occluded vision, and rectangle-only pixel sprites.
 import { TILE_SIZE as T, TILE, isWalkable, EVENTS } from "./shared.js";
 
+const PATROL_STEP = 0.48;
+const CONE_COSINE = Math.cos(Math.PI / 6);
+const DIRECTIONS = [{ x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 0, y: -1 }];
+
 export function createRobots(map) {
-  return map.robotSpawns.map((p, i) => ({ ...p, facing: { x: 1, y: 0 }, clock: i * 0.07 }));
+  return map.robotSpawns.map((p, i) => ({
+    ...p, facing: { x: 1, y: 0 }, clock: i * 0.07,
+    patrolSeed: ((p.x + 1) * 73856093 ^ (p.y + 1) * 19349663 ^ map.width * 83492791 ^ i) >>> 0,
+    route: [],
+  }));
+}
+
+/** Pick a random reachable destination, then reconstruct a shortest cardinal route. */
+function planPatrol(robot, map) {
+  const start = robot.y * map.width + robot.x;
+  const previous = new Int32Array(map.width * map.height).fill(-1);
+  previous[start] = start;
+  const queue = [start];
+  for (let head = 0; head < queue.length; head++) {
+    const tile = queue[head], x = tile % map.width, y = Math.floor(tile / map.width);
+    for (const direction of DIRECTIONS) {
+      const nx = x + direction.x, ny = y + direction.y, next = ny * map.width + nx;
+      if (!isWalkable(map, nx, ny) || previous[next] !== -1) continue;
+      previous[next] = tile;
+      queue.push(next);
+    }
+  }
+  if (queue.length < 2) return [];
+  // Local random state makes retries reproducible without changing global randomness.
+  robot.patrolSeed = (Math.imul(robot.patrolSeed ?? start, 1664525) + 1013904223) >>> 0;
+  const destination = queue[1 + Math.floor(robot.patrolSeed / 4294967296 * (queue.length - 1))];
+  const route = [];
+  for (let tile = destination; tile !== start; tile = previous[tile])
+    route.push({ x: tile % map.width, y: Math.floor(tile / map.width) });
+  return route.reverse();
 }
 
 /** Supercover grid ray: walls block sight, including diagonal wall corners. Desks do not. */
@@ -29,13 +62,13 @@ export function hasLineOfSight(map, from, to) {
   return true;
 }
 
-/** 90-degree full cone, inclusive range/boundaries; all four catch conditions must hold. */
+/** 60-degree full cone, inclusive range/boundaries; all four catch conditions must hold. */
 export function canSeePlayer(map, robot, player, sightRange) {
   if (player.hidden) return false;
   const dx = player.x - robot.x, dy = player.y - robot.y;
   const distance = Math.hypot(dx, dy);
   if (distance > sightRange) return false;
-  if (distance && (dx * robot.facing.x + dy * robot.facing.y) / distance < Math.SQRT1_2 - 1e-9) return false;
+  if (distance && (dx * robot.facing.x + dy * robot.facing.y) / distance < CONE_COSINE - 1e-9) return false;
   return hasLineOfSight(map, robot, player);
 }
 
@@ -48,15 +81,28 @@ export function detectPlayer(robots, player, map, sightRange, bus) {
 export function updateRobots(robots, dt, player, map, sightRange, bus) {
   // Detect both before and after patrol movement so a robot cannot step past the player.
   if (detectPlayer(robots, player, map, sightRange, bus)) return;
+  const elapsed = Number.isFinite(dt) ? Math.max(0, dt) : 0;
   for (const robot of robots) {
-    robot.clock += dt;
-    if (robot.clock < 0.48) continue;
-    robot.clock -= 0.48;
-    const { x: dx, y: dy } = robot.facing;
-    if (isWalkable(map, robot.x + dx, robot.y + dy)) {
-      robot.x += dx; robot.y += dy;
-    } else {
-      robot.facing = { x: -dy, y: dx };
+    robot.clock = (robot.clock ?? 0) + elapsed;
+    while (robot.clock >= PATROL_STEP) {
+      robot.clock -= PATROL_STEP;
+      if (!robot.route) {
+        // Accept existing caller-created robots with only position, facing, and clock.
+        const next = { x: robot.x + robot.facing.x, y: robot.y + robot.facing.y };
+        robot.route = isWalkable(map, next.x, next.y) ? [next] : [];
+      }
+      const next = robot.route[0];
+      if (!next || !isWalkable(map, next.x, next.y) ||
+          Math.abs(next.x - robot.x) + Math.abs(next.y - robot.y) !== 1)
+        robot.route = planPatrol(robot, map);
+      const point = robot.route.shift();
+      if (!point) {
+        robot.clock %= PATROL_STEP;
+        break;
+      }
+      robot.facing = { x: point.x - robot.x, y: point.y - robot.y };
+      robot.x = point.x; robot.y = point.y;
+      if (detectPlayer(robots, player, map, sightRange, bus)) return;
     }
   }
   detectPlayer(robots, player, map, sightRange, bus);
