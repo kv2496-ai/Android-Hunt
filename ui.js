@@ -98,7 +98,7 @@ function drawTitle(ctx, presentation, time) {
   if (elapsed < 3100) return;
   const slide = Math.min(1, (elapsed - 3100) / 850);
   const eased = 1 - (1 - slide) ** 3;
-  const size = Math.max(1, Math.min(2, Math.floor((width - 32) / (26 * 6))));
+  const size = Math.max(1, Math.min(2, Math.floor((width - 32) / (27 * 6))));
   const narratorY = Math.round(-40 + (cy + 22) * eased);
   pixelText(ctx, "The droids have gone rogue.\nEscape the factory.", cx, narratorY, size, "#e7e6c4");
   if (slide < 1) return;
@@ -122,15 +122,21 @@ export function drawOverlay(ctx, state, level) {
     return;
   }
   if (state === "playing") return;
+  if (state !== "caught" && state !== "win") return;
   const cx = ctx.canvas.width / 2, cy = ctx.canvas.height / 2;
-  ctx.fillStyle = "rgba(13, 28, 21, 0.78)"; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-  ctx.fillStyle = state === "caught" ? "#bc7957" : "#a6bd7b"; ctx.fillRect(cx - 13, cy - 65, 26, 3);
-  pixelText(ctx, state === "title" ? "AFTER HOURS DIVISION" : `FLOOR ${String(level).padStart(2, "0")}`, cx, cy - 46);
-  pixelText(ctx, { title: "NIGHT SHIFT", caught: "BUSTED", win: "SHIFT COMPLETE" }[state], cx, cy - 22, 3);
-  pixelText(ctx, { title: "CLOCK IN. STAY UNSEEN.", caught: "THE ANDROIDS NEVER CLOCK OUT.", win: "POWER ON. OPERATOR OUT." }[state], cx, cy + 11);
-  ctx.fillStyle = "#3c573d"; ctx.fillRect(cx - 79, cy + 39, 158, 23);
-  pixelText(ctx, { title: "ENTER TO BEGIN", caught: "ENTER TO RETRY", win: "ENTER - NEXT FLOOR" }[state], cx, cy + 48);
-  pixelText(ctx, "HIDE ON DESKS. SWITCH ON POWER.", cx, cy + 83, 1, "#8b9f78");
+  const caught = state === "caught", accent = caught ? "#e58b70" : "#b6dc8d";
+  ctx.fillStyle = "rgba(6, 12, 10, 0.86)"; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.fillStyle = accent; ctx.fillRect(24, cy - 94, ctx.canvas.width - 48, 188);
+  ctx.fillStyle = "#101d17"; ctx.fillRect(25, cy - 93, ctx.canvas.width - 50, 186);
+  pixelText(ctx, `${caught ? "SIGNAL LOST" : "ALL CLEAR"} / LEVEL ${level}`, cx, cy - 76, 1, "#819f89");
+  ctx.fillStyle = accent; ctx.fillRect(cx - 13, cy - 53, 26, 3);
+  const heading = caught ? "You were caught!" : `Level ${level} cleared`;
+  const size = Math.max(1, Math.min(3, Math.floor((ctx.canvas.width - 64) / (heading.length * 6 - 1))));
+  pixelText(ctx, heading, cx, cy - 29, size, accent);
+  pixelText(ctx, caught ? "Stay unseen. Hide under desks." : "All generators online. Exit reached.", cx, cy + 7, 1, "#d2d8b9");
+  ctx.fillStyle = caught ? "#492b25" : "#29402c"; ctx.fillRect(cx - 115, cy + 34, 230, 27);
+  pixelText(ctx, caught ? "Press SPACE to restart" : "Press SPACE to continue", cx, cy + 44, 1, "#edf1cc");
+  pixelText(ctx, caught ? `RETRY LEVEL ${level} / SPACE OR ENTER` : `NEXT: LEVEL ${Number(level) + 1} / SPACE OR ENTER`, cx, cy + 76, 1, "#819f89");
 }
 
 export function createUI(document, onAction) {
@@ -150,8 +156,16 @@ export function createUI(document, onAction) {
       byId("state-label").textContent = { title: "OFF THE CLOCK", playing: "ON THE CLOCK", caught: "DETECTED", win: "CLEARED" }[state];
       byId("camera-status").textContent = `● ${{ title: "STANDBY", playing: "LIVE FEED", caught: "ALERT", win: "ALL CLEAR" }[state]}`;
       byId("stealth-status").textContent = state === "playing" ? (player.hidden ? "IN COVER / INVISIBLE" : "EXPOSED / STAY ALERT") : "AWAITING OPERATOR";
-      byId("action-label").textContent = { title: "Start [SPACE]", playing: "Switch generator [E]", caught: "Try again", win: "Next floor" }[state];
-      byId("message").textContent = state === "title" ? "The droids have gone rogue. Escape the factory. Press SPACE to start." : game.notice || "An empty desk is a good place to disappear.";
+      byId("action-label").textContent = { title: "Start [SPACE]", playing: "Switch generator [E]", caught: "Restart level [SPACE]", win: "Next level [SPACE]" }[state];
+      const message = {
+        title: "The droids have gone rogue. Escape the factory. Press SPACE to start.",
+        caught: `You were caught! Press SPACE to restart level ${level}. Hide under desks to stay unseen.`,
+        win: `Level ${level} cleared. Press SPACE to continue to level ${Number(level) + 1}.`,
+      }[state] || game.notice || "An empty desk is a good place to disappear.";
+      byId("message").textContent = message;
+      canvas.setAttribute("aria-label", state === "playing"
+        ? "Factory stealth game. Move with WASD or arrows. Hide under desks. Activate generators with E or Space, then reach the exit."
+        : message);
       byId("generators").replaceChildren(...map.generators.map((g, i) => {
         const li = document.createElement("li");
         li.className = g.on ? "powered" : "";
