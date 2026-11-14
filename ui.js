@@ -81,6 +81,115 @@ function presentationFor(canvas) {
   return presentations.get(canvas);
 }
 
+function createSounds(document) {
+  const window = document.defaultView;
+  const AudioContext = window?.AudioContext || window?.webkitAudioContext;
+  let supported = !!AudioContext, context, output, muted = false;
+  let previousState = null, previousMap = null, previousPowered = 0, lastBuzz = -1;
+  const voices = new Set();
+  function stop() {
+    for (const voice of voices) {
+      voice.oscillator.onended = null;
+      try { voice.oscillator.stop(); } catch { /* Already ended. */ }
+      voice.oscillator.disconnect(); voice.envelope.disconnect();
+    }
+    voices.clear();
+  }
+  function unlock() {
+    if (!supported || muted || document.hidden) return;
+    try {
+      if (!context) {
+        context = new AudioContext();
+        output = context.createGain();
+        output.gain.value = 0.3;
+        output.connect(context.destination);
+      }
+      if (context.state === "suspended") context.resume()?.catch(() => {});
+    } catch {
+      supported = false;
+      stop();
+    }
+  }
+  function tone(frequency, endFrequency, delay, duration, type, volume) {
+    const oscillator = context.createOscillator(), envelope = context.createGain();
+    const start = context.currentTime + delay, end = start + duration;
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(frequency, start);
+    oscillator.frequency.exponentialRampToValueAtTime(endFrequency, end);
+    envelope.gain.setValueAtTime(0, start);
+    envelope.gain.linearRampToValueAtTime(volume, start + 0.012);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, end);
+    oscillator.connect(envelope); envelope.connect(output);
+    const voice = { oscillator, envelope };
+    voices.add(voice);
+    oscillator.onended = () => {
+      oscillator.disconnect(); envelope.disconnect(); voices.delete(voice);
+    };
+    oscillator.start(start); oscillator.stop(end + 0.02);
+  }
+  function play(effect, delay = 0) {
+    // Never queue blocked or muted effects to play unexpectedly after unlocking.
+    if (!supported || muted || document.hidden || context?.state !== "running") return false;
+    try {
+      if (effect === "buzz") {
+        tone(60, 42, delay, 0.16, "sawtooth", 0.09);
+        tone(120, 85, delay, 0.12, "square", 0.035);
+      } else if (effect === "hum") {
+        tone(55, 110, delay, 0.65, "triangle", 0.12);
+        tone(110, 220, delay + 0.08, 0.55, "sine", 0.06);
+      } else if (effect === "alarm") {
+        for (let i = 0; i < 3; i++) tone(i % 2 ? 660 : 880, 330, delay + i * 0.21, 0.18, "square", 0.08);
+      } else if (effect === "chime") {
+        [523.25, 659.25, 783.99, 1046.5].forEach((note, i) => tone(note, note, delay + i * 0.09, 0.4, "sine", 0.1));
+      }
+      return true;
+    } catch {
+      stop();
+      supported = false;
+      return false;
+    }
+  }
+  function silence() {
+    stop();
+    if (context?.state === "running") context.suspend()?.catch(() => {});
+  }
+  document.addEventListener("keydown", event => {
+    if (event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.isComposing ||
+        event.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName)) return;
+    if (event.code === "KeyM" || event.key?.toLowerCase() === "m") {
+      event.preventDefault();
+      muted = !muted;
+      if (output) output.gain.value = muted ? 0 : 0.3;
+      if (muted) stop();
+    }
+    unlock();
+  }, true);
+  document.addEventListener("pointerdown", unlock, true);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) silence(); });
+  window?.addEventListener?.("blur", silence);
+  return {
+    get label() { return muted ? "M: SOUND OFF" : supported ? "M: SOUND ON" : "M: AUDIO N/A"; },
+    update(game, presentation, time) {
+      const powered = game.map.generators.filter(g => g.on).length;
+      if (previousState !== game.state) {
+        stop();
+        lastBuzz = -1;
+        if (game.state === "caught") play("alarm");
+        if (game.state === "win") play("chime");
+      }
+      if (previousMap === game.map && powered > previousPowered)
+        for (let i = 0; i < powered - previousPowered; i++) play("hum", i * 0.06);
+      if (game.state === "title" && !presentation.reducedMotion) {
+        const elapsed = time - presentation.titleStart;
+        const phase = [[900, 1100], [1500, 1700], [2100, 2350], [2750, 3100]]
+          .findIndex(([start, end]) => elapsed >= start && elapsed < end);
+        if (phase >= 0 && phase !== lastBuzz && play("buzz")) lastBuzz = phase;
+      }
+      previousState = game.state; previousMap = game.map; previousPowered = powered;
+    },
+  };
+}
+
 function drawTitle(ctx, presentation, time) {
   const { width, height } = ctx.canvas, cx = width / 2, cy = height / 2;
   const elapsed = presentation.reducedMotion ? 5000 : time - presentation.titleStart;
@@ -107,7 +216,8 @@ function drawTitle(ctx, presentation, time) {
   if (elapsed < 4200) return;
   ctx.fillStyle = "#203a2b"; ctx.fillRect(cx - 89, cy + 57, 178, 25);
   pixelText(ctx, "Press SPACE to start", cx, cy + 66, 1, "#e9f0bd");
-  pixelText(ctx, "WASD / ARROWS: MOVE   E: POWER", cx, height - 22, 1, "#819f89");
+  pixelText(ctx, "WASD / ARROWS: MOVE   E: POWER", cx, height - 30, 1, "#819f89");
+  pixelText(ctx, presentation.sounds?.label || "M: SOUND ON", cx, height - 16, 1, "#819f89");
 }
 
 export function drawOverlay(ctx, state, level) {
@@ -137,9 +247,10 @@ export function drawOverlay(ctx, state, level) {
   ctx.fillStyle = caught ? "#492b25" : "#29402c"; ctx.fillRect(cx - 115, cy + 34, 230, 27);
   pixelText(ctx, caught ? "Press SPACE to restart" : "Press SPACE to continue", cx, cy + 44, 1, "#edf1cc");
   pixelText(ctx, caught ? `RETRY LEVEL ${level} / SPACE OR ENTER` : `NEXT: LEVEL ${Number(level) + 1} / SPACE OR ENTER`, cx, cy + 76, 1, "#819f89");
+  pixelText(ctx, presentation.sounds?.label || "M: SOUND ON", cx, ctx.canvas.height - 14, 1, "#819f89");
 }
 
-function drawHUD(ctx, game, powered, nearby) {
+function drawHUD(ctx, game, powered, nearby, soundLabel) {
   const { width, height } = ctx.canvas, { level, map, player } = game;
   const total = map.generators.length, allPowered = total > 0 && powered === total;
   ctx.fillStyle = "rgba(7, 16, 12, 0.94)";
@@ -158,14 +269,18 @@ function drawHUD(ctx, game, powered, nearby) {
     : nearby ? "E / SPACE: SWITCH ON GENERATOR"
     : player.hidden ? "HIDDEN / THE DROIDS CANNOT SEE YOU"
     : "FIND GENERATORS / HIDE UNDER DESKS";
-  pixelText(ctx, hint, width / 2, height - 12, 1, allPowered || player.hidden ? "#b6dc8d" : "#a8b49a");
+  pixelText(ctx, hint, 12 + (hint.length * 6 - 1) / 2, height - 12, 1, allPowered || player.hidden ? "#b6dc8d" : "#a8b49a");
+  pixelText(ctx, soundLabel, width - 12 - (soundLabel.length * 6 - 1) / 2, height - 12, 1, "#d2d8b9");
 }
 
 export function createUI(document, onAction) {
   const byId = id => document.getElementById(id);
   byId("action").addEventListener("click", onAction);
   const canvas = byId("game"), ctx = canvas.getContext?.("2d");
-  presentationFor(canvas).reducedMotion = !!document.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const presentation = presentationFor(canvas), sounds = createSounds(document);
+  presentation.sounds = sounds;
+  presentation.reducedMotion = !!document.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  canvas.setAttribute("aria-keyshortcuts", "M");
   let signature = "", generatorSignature = "";
   return {
     update(game) {
@@ -173,12 +288,13 @@ export function createUI(document, onAction) {
       const powered = map.generators.filter(g => g.on).length;
       const allPowered = map.generators.length > 0 && powered === map.generators.length;
       const nearby = map.generators.some(g => !g.on && Math.abs(g.x - player.x) + Math.abs(g.y - player.y) <= 1);
+      sounds.update(game, presentation, globalThis.performance?.now() ?? Date.now());
       // The controller draws the world and overlays before this update each frame.
-      if (ctx && state === "playing") drawHUD(ctx, game, powered, nearby);
+      if (ctx && state === "playing") drawHUD(ctx, game, powered, nearby, sounds.label);
       const timer = `SHIFT ${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`;
       if (byId("timer").textContent !== timer) byId("timer").textContent = timer;
       const powerSignature = `${level}/${map.generators.map(g => Number(g.on)).join()}`;
-      const next = `${state}/${level}/${player.hidden}/${powerSignature}/${nearby}/${game.notice}`;
+      const next = `${state}/${level}/${player.hidden}/${powerSignature}/${nearby}/${game.notice}/${sounds.label}`;
       if (signature === next) return;
       signature = next;
       byId("floor-label").textContent = `FLOOR ${String(level).padStart(2, "0")}`;
@@ -201,9 +317,9 @@ export function createUI(document, onAction) {
         win: `Level ${level} cleared. Press SPACE to continue to level ${Number(level) + 1}.`,
       }[state] || mission;
       byId("message").textContent = message;
-      canvas.setAttribute("aria-label", state === "playing"
+      canvas.setAttribute("aria-label", (state === "playing"
         ? `Level ${level}. ${powered}/${map.generators.length} generators online. ${player.hidden ? "Hidden under a desk." : "Exposed."} Move with WASD or arrows. Activate generators with E or Space, then reach the exit.`
-        : message);
+        : message) + ` ${sounds.label}. Press M to mute or unmute sound.`);
       if (generatorSignature === powerSignature) return;
       generatorSignature = powerSignature;
       byId("generators").setAttribute("aria-label", `${powered}/${map.generators.length} generators online`);
