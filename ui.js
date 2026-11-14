@@ -139,33 +139,74 @@ export function drawOverlay(ctx, state, level) {
   pixelText(ctx, caught ? `RETRY LEVEL ${level} / SPACE OR ENTER` : `NEXT: LEVEL ${Number(level) + 1} / SPACE OR ENTER`, cx, cy + 76, 1, "#819f89");
 }
 
+function drawHUD(ctx, game, powered, nearby) {
+  const { width, height } = ctx.canvas, { level, map, player } = game;
+  const total = map.generators.length, allPowered = total > 0 && powered === total;
+  ctx.fillStyle = "rgba(7, 16, 12, 0.94)";
+  ctx.fillRect(0, 0, width, 20);
+  ctx.fillRect(0, height - 18, width, 18);
+  ctx.fillStyle = allPowered ? "#b6dc8d" : "#536d4a"; ctx.fillRect(0, 19, width, 1);
+  const levelLabel = `LEVEL ${String(level).padStart(2, "0")}`;
+  pixelText(ctx, levelLabel, 12 + (levelLabel.length * 6 - 1) / 2, 6, 1, "#e7e6c4");
+  const powerLabel = `GENERATORS ${powered}/${total}`;
+  pixelText(ctx, powerLabel, width - 12 - (powerLabel.length * 6 - 1) / 2, 6, 1, allPowered ? "#b6dc8d" : "#e1c06b");
+  map.generators.forEach((generator, i) => {
+    ctx.fillStyle = generator.on ? "#b6dc8d" : "#465242";
+    ctx.fillRect(Math.round(width / 2 - total * 10 / 2 + i * 10), 8, 6, 5);
+  });
+  const hint = allPowered ? "POWER RESTORED / REACH THE EXIT"
+    : nearby ? "E / SPACE: SWITCH ON GENERATOR"
+    : player.hidden ? "HIDDEN / THE DROIDS CANNOT SEE YOU"
+    : "FIND GENERATORS / HIDE UNDER DESKS";
+  pixelText(ctx, hint, width / 2, height - 12, 1, allPowered || player.hidden ? "#b6dc8d" : "#a8b49a");
+}
+
 export function createUI(document, onAction) {
   const byId = id => document.getElementById(id);
   byId("action").addEventListener("click", onAction);
-  const canvas = byId("game");
+  const canvas = byId("game"), ctx = canvas.getContext?.("2d");
   presentationFor(canvas).reducedMotion = !!document.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-  let signature = "";
+  let signature = "", generatorSignature = "";
   return {
     update(game) {
       const { state, level, map, player, elapsed } = game;
-      byId("timer").textContent = `SHIFT ${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`;
-      const next = `${state}/${level}/${player.hidden}/${map.generators.map(g => g.on).join()}/${game.notice}`;
+      const powered = map.generators.filter(g => g.on).length;
+      const allPowered = map.generators.length > 0 && powered === map.generators.length;
+      const nearby = map.generators.some(g => !g.on && Math.abs(g.x - player.x) + Math.abs(g.y - player.y) <= 1);
+      // The controller draws the world and overlays before this update each frame.
+      if (ctx && state === "playing") drawHUD(ctx, game, powered, nearby);
+      const timer = `SHIFT ${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`;
+      if (byId("timer").textContent !== timer) byId("timer").textContent = timer;
+      const powerSignature = `${level}/${map.generators.map(g => Number(g.on)).join()}`;
+      const next = `${state}/${level}/${player.hidden}/${powerSignature}/${nearby}/${game.notice}`;
       if (signature === next) return;
       signature = next;
       byId("floor-label").textContent = `FLOOR ${String(level).padStart(2, "0")}`;
       byId("state-label").textContent = { title: "OFF THE CLOCK", playing: "ON THE CLOCK", caught: "DETECTED", win: "CLEARED" }[state];
       byId("camera-status").textContent = `● ${{ title: "STANDBY", playing: "LIVE FEED", caught: "ALERT", win: "ALL CLEAR" }[state]}`;
       byId("stealth-status").textContent = state === "playing" ? (player.hidden ? "IN COVER / INVISIBLE" : "EXPOSED / STAY ALERT") : "AWAITING OPERATOR";
-      byId("action-label").textContent = { title: "Start [SPACE]", playing: "Switch generator [E]", caught: "Restart level [SPACE]", win: "Next level [SPACE]" }[state];
+      byId("action").disabled = state === "playing" && !nearby;
+      byId("action-label").textContent = {
+        title: "Start [SPACE]",
+        playing: allPowered ? "Exit unlocked" : nearby ? "Switch generator [E]" : "Find a generator",
+        caught: "Restart level [SPACE]",
+        win: "Next level [SPACE]",
+      }[state];
+      const mission = allPowered ? "All generators online. The green exit is unlocked. Reach it to clear the level."
+        : nearby ? `Offline generator in reach. Press E or SPACE. ${powered}/${map.generators.length} generators online.`
+        : game.notice || "An empty desk is a good place to disappear.";
       const message = {
         title: "The droids have gone rogue. Escape the factory. Press SPACE to start.",
         caught: `You were caught! Press SPACE to restart level ${level}. Hide under desks to stay unseen.`,
         win: `Level ${level} cleared. Press SPACE to continue to level ${Number(level) + 1}.`,
-      }[state] || game.notice || "An empty desk is a good place to disappear.";
+      }[state] || mission;
       byId("message").textContent = message;
       canvas.setAttribute("aria-label", state === "playing"
-        ? "Factory stealth game. Move with WASD or arrows. Hide under desks. Activate generators with E or Space, then reach the exit."
+        ? `Level ${level}. ${powered}/${map.generators.length} generators online. ${player.hidden ? "Hidden under a desk." : "Exposed."} Move with WASD or arrows. Activate generators with E or Space, then reach the exit.`
         : message);
+      if (generatorSignature === powerSignature) return;
+      generatorSignature = powerSignature;
+      byId("generators").setAttribute("aria-label", `${powered}/${map.generators.length} generators online`);
       byId("generators").replaceChildren(...map.generators.map((g, i) => {
         const li = document.createElement("li");
         li.className = g.on ? "powered" : "";
