@@ -285,6 +285,24 @@ export function createUI(document, onAction) {
   const byId = id => document.getElementById(id);
   byId("action").addEventListener("click", onAction);
   const canvas = byId("game"), ctx = canvas.getContext?.("2d");
+  const frame = byId("game-frame"), fullscreen = byId("fullscreen");
+  const syncFullscreen = () => {
+    fullscreen.textContent = document.fullscreenElement === frame ? "Exit fullscreen" : "⛶ Fullscreen";
+    fullscreen.setAttribute("aria-pressed", String(document.fullscreenElement === frame));
+    canvas.focus({ preventScroll: true });
+  };
+  const toggleFullscreen = async () => {
+    try { if (document.fullscreenElement === frame) await document.exitFullscreen(); else await frame.requestFullscreen(); }
+    catch { /* Fullscreen may be denied by the browser. */ }
+  };
+  fullscreen.disabled = !frame.requestFullscreen;
+  fullscreen.addEventListener("click", toggleFullscreen);
+  document.addEventListener("fullscreenchange", syncFullscreen);
+  document.addEventListener("keydown", event => {
+    if (event.code !== "KeyF" || fullscreen.disabled || event.repeat || event.ctrlKey || event.metaKey || event.altKey ||
+        event.isComposing || event.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName)) return;
+    event.preventDefault(); void toggleFullscreen();
+  });
   const presentation = presentationFor(canvas), sounds = createSounds(document);
   presentation.sounds = sounds;
   const motion = document.defaultView?.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -322,7 +340,7 @@ export function createUI(document, onAction) {
   motion?.addEventListener?.("change", event => {
     presentation.reducedMotion = event.matches; resetEffects();
   });
-  canvas.setAttribute("aria-keyshortcuts", "M");
+  canvas.setAttribute("aria-keyshortcuts", "M F");
   let signature = "", generatorSignature = "";
   return {
     update(game) {
